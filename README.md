@@ -1,0 +1,2 @@
+# Ubuntu-Command-Simplification-Tool
+此工具的开发皆在于简化Ubuntu命令使用户在更便捷的环境下完成工作
