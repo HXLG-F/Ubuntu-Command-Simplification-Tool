@@ -1785,7 +1785,7 @@ command_check() {
 command_UCST() { #简介信息
     echo "Ubuntu Command Simplification Tool——————Ubuntu命令简化工具"
     echo "此工具的开发皆在于简化Ubuntu命令使用户在更便捷的环境下完成工作"
-    echo "开发者：哈西力工"
+    echo "开源存储库：https://github.com/HXLG-F/Ubuntu-Command-Simplification-Tool"
     echo "输入helpUCST获得可用命令帮助"
     echo "祝您工作顺利！"
 }
