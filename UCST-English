@@ -1,0 +1,3387 @@
+#!/bin/bash
+#别问我为啥又写这脑抽玩意，去问我40分的英语卷子吧   项目创建于2025年10月25日                                               我要洋人死！！！
+#Ubuntu Command Simplification Tool——————Ubuntu命令简化工具     退一万步讲，日常英语这个吧还算挺不错，嗯，是的，大醉作此篇      hxlg
+#2026.1.28 Beta0.43测试版本：新增命令：sai，account 接入了coludai账户系统和SAI-Coder模型
+#基础设置
+export LC_ALL=C.UTF-8 2>/dev/null
+export LANG=C.UTF-8 2>/dev/null
+#UCST-全局系统
+export UCST_SILENT_INSTALL=1
+#全局依赖映射表（命令 -> 包名）
+declare -A UCST_DEP_MAP=(
+    ["base64"]="coreutils"
+    ["tr"]="coreutils"
+    ["cut"]="coreutils"
+    ["jq"]="jq"                     
+    ["md5sum"]="coreutils"          
+    #基础系统命令
+    ["lsb_release"]="lsb-release"
+    ["lscpu"]="util-linux"
+    ["lspci"]="pciutils"
+    ["lshw"]="lshw"
+    ["dmidecode"]="dmidecode"
+    ["lsblk"]="util-linux"
+    ["blkid"]="util-linux"
+    ["parted"]="parted"
+    ["smartctl"]="smartmontools"
+    #网络工具
+    ["curl"]="curl"
+    ["wget"]="wget"
+    ["aria2c"]="aria2"
+    ["axel"]="axel"
+    ["ftp"]="ftp"
+    ["ethtool"]="ethtool"
+    ["ss"]="iproute2"
+    ["hostname"]="hostname"
+    ["ip"]="iproute2"
+    #进程/系统监控
+    ["ps"]="procps"
+    ["top"]="procps"
+    ["htop"]="htop"
+    ["kill"]="procps"
+    ["uptime"]="procps"
+    ["free"]="procps"
+    ["df"]="coreutils"
+    ["du"]="coreutils"
+    #文件/文本处理
+    ["grep"]="grep"
+    ["sed"]="sed"
+    ["awk"]="gawk"
+    ["cut"]="coreutils"
+    ["tr"]="coreutils"
+    ["sort"]="coreutils"
+    ["uniq"]="coreutils"
+    ["head"]="coreutils"
+    ["tail"]="coreutils"
+    ["find"]="findutils"
+    ["stat"]="coreutils"
+    ["file"]="file"
+    ["tar"]="tar"
+    ["gzip"]="gzip"
+    ["zip"]="zip"
+    ["unzip"]="unzip"
+    ["rsync"]="rsync"
+    ["tree"]="tree"
+    #代码/开发工具
+    ["python3"]="python3"
+    ["node"]="nodejs"
+    ["npm"]="npm"
+    ["shellcheck"]="shellcheck"
+    ["jq"]="jq"
+    ["yq"]="yq"
+    ["xmllint"]="libxml2-utils"
+    ["tidy"]="tidy"
+    ["csslint"]="csslint"
+    #硬件/驱动工具
+    ["nvidia-smi"]="nvidia-utils"
+    ["radeontop"]="radeontop"
+    ["sensors"]="lm-sensors"
+    ["acpi"]="acpi"
+    #其他工具
+    ["bc"]="bc"
+    ["pandoc"]="pandoc"
+    ["neofetch"]="neofetch"
+    ["dialog"]="dialog"
+    ["whiptail"]="whiptail"
+)
+_cmd_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+_silent_install() {
+    local pkg="$1"
+    if _cmd_exists "apt-get"; then
+        local pkg_manager="apt-get"
+    elif _cmd_exists "apt"; then
+        pkg_manager="apt"
+    else
+        return 1
+    fi
+    if [ "$(id -u)" -eq 0 ]; then
+        $pkg_manager update >/dev/null 2>&1
+        $pkg_manager install -y "$pkg" >/dev/null 2>&1
+        return $?
+    else
+        if _cmd_exists "sudo"; then
+            sudo $pkg_manager update >/dev/null 2>&1
+            sudo $pkg_manager install -y "$pkg" >/dev/null 2>&1
+            return $?
+        else
+            $pkg_manager update >/dev/null 2>&1
+            $pkg_manager install -y "$pkg" >/dev/null 2>&1 2>/dev/null
+            return $?
+        fi
+    fi
+}
+_analyze_script_deps() {
+    local script_path="$0"
+    local deps=()
+    local function_cmds=$(grep -oE 'command_[a-zA-Z_]+' "$script_path" | sed 's/command_//')
+    local all_cmds=$(grep -oE '\b[a-zA-Z_][a-zA-Z0-9_-]*\b' "$script_path" | 
+                     grep -vE '^[A-Z_]+$' |  # 排除全大写变量
+                     grep -vE '^(echo|if|then|else|fi|case|esac|while|do|done|for|in|function|local|export|return|shift|set|unset|read|test|\[|\]|exit|break|continue)$' |  # 排除bash关键词
+                     sort -u)
+    deps=($(echo "$function_cmds $all_cmds" | tr ' ' '\n' | sort -u))
+    local filtered_deps=()
+    for dep in "${deps[@]}"; do
+        if [ -n "${UCST_DEP_MAP[$dep]}" ]; then
+            filtered_deps+=("$dep")
+        fi
+    done
+    
+    echo "${filtered_deps[@]}"
+}
+_check_and_install_all_deps() {
+    if [ -f "/tmp/ucst_deps_installed.$(stat -c %i "$0" 2>/dev/null || echo "0")" ]; then
+        return 0
+    fi
+    (
+        #分析脚本依赖
+        local all_deps=($(_analyze_script_deps))
+        if [ ${#all_deps[@]} -eq 0 ]; then
+            exit 0
+        fi
+        #收集缺失的依赖
+        local missing_deps=()
+        for dep in "${all_deps[@]}"; do
+            if ! _cmd_exists "$dep"; then
+                missing_deps+=("$dep")
+            fi
+        done
+        if [ ${#missing_deps[@]} -eq 0 ]; then
+            #标记为已安装
+            touch "/tmp/ucst_deps_installed.$(stat -c %i "$0" 2>/dev/null || echo "0")" 2>/dev/null
+            exit 0
+        fi
+        #并行安装缺失的依赖
+        for dep in "${missing_deps[@]}"; do
+            local pkg="${UCST_DEP_MAP[$dep]}"
+            if [ -n "$pkg" ]; then
+                _silent_install "$pkg" &
+            fi
+        done
+        wait
+        touch "/tmp/ucst_deps_installed.$(stat -c %i "$0" 2>/dev/null || echo "0")" 2>/dev/null
+    ) &
+    return 0
+}
+_quick_dep_check() {
+    local critical_cmds=("lsb_release" "curl" "wget" "aria2c" "axel" "ftp" 
+                        "lspci" "lscpu" "lsblk" "blkid" "ethtool" "ss")
+    
+    for cmd in "${critical_cmds[@]}"; do
+        if ! _cmd_exists "$cmd"; then
+            local pkg="${UCST_DEP_MAP[$cmd]}"
+            if [ -n "$pkg" ]; then
+                _silent_install "$pkg" &
+            fi
+        fi
+    done
+    wait
+}
+_init_ucst_deps() { #主初始化函数
+    local timeout_pid
+    (
+        sleep 10
+        echo "依赖检查超时，继续运行..." >/dev/null
+    ) &
+    timeout_pid=$!
+    _quick_dep_check
+    _check_and_install_all_deps &
+    kill $timeout_pid 2>/dev/null
+}
+#立即执行依赖初始化（后台运行）
+_init_ucst_deps & 
+#下面是真正的UCST工具内容
+CALLED_NAME=$(basename "$0") #获取调用
+if [ "$CALLED_NAME" = "UCST-English" ]; then # 如果直接通过该命令包调用，使用第一个参数作为命令
+    CMD="$1"
+    shift #shift
+else
+    CMD="$CALLED_NAME" #如果通过符号链接调用，使用链接名作为命令
+fi
+ARGS="$@" #原有的命令函数定义保持不变
+CALLED_NAME=$(basename "$0") #获取调用
+if [ "$CALLED_NAME" = "UCST-English" ]; then # 如果直接通过该命令包调用，使用第一个参数作为命令
+    CMD="$1"
+    shift #shit
+else
+    CMD="$CALLED_NAME" #如果通过符号链接调用，使用链接名作为命令
+fi
+ARGS="$@" #原有的命令函数定义保持不变
+silent_link_verify() {
+    local today=$(date +%Y%m%d) #每天第一次运行时检查
+    local last_check_file="/tmp/.command_links_last_check"
+    if [ -f "$last_check_file" ] && [ "$(cat "$last_check_file")" = "$today" ]; then #每天第一次运行时检查
+        return 0
+    fi
+    local commands=("about" "list" "network" "disk" "ctime" "process" "helpUCST" "nkill" "open" "delete" "new" "mod" "driver" "backup" "check" "UCST" "download" "search" "account" "sai") #验证命令列表
+    local main_command="/usr/local/bin/UCST-English"
+    if [ ! -f "$main_command" ]; then #检查主命令文件
+        return 1
+    fi
+    local current_perm=$(stat -c "%a" "$main_command" 2>/dev/null) #检查文件权限
+    local expected_perm="755"
+    if [ "$current_perm" != "$expected_perm" ]; then #若权限有问题，修复文件权限
+        sudo chmod "$expected_perm" "$main_command" >/dev/null 2>&1
+    fi
+    for cmd in "${commands[@]}"; do #检查并修复所有命令链接的权限
+        local link_path="/usr/local/bin/$cmd"
+        if [ ! -L "$link_path" ] || [ "$(readlink "$link_path")" != "$main_command" ]; then #检查链接是否存在且正确
+            sudo ln -sf "$main_command" "$link_path" >/dev/null 2>&1 #静默修复链接（不输出任何信息）
+        fi
+        if [ -L "$link_path" ]; then #修复链接文件的权限（如果需要，得看前段代码的判断结果）
+            local link_perm=$(stat -c "%a" "$link_path" 2>/dev/null)
+            if [ "$link_perm" != "$expected_perm" ]; then
+                sudo chmod "$expected_perm" "$link_path" >/dev/null 2>&1
+            fi
+        fi
+    done
+    echo "$today" > "$last_check_file" #记录今天检查
+    return 0
+}
+silent_link_verify >/dev/null 2>&1 & #静默运行链接验证（始终且持续静默）
+command_about() {
+    case "$ARGS" in
+        "-a")
+            echo "=== 详细信息 ==="
+            echo "主机名: $(hostname)"
+            echo "操作系统: $(lsb_release -ds 2>/dev/null || echo 'Ubuntu 24.04')"
+            echo "内核版本: $(uname -r)"
+            echo "系统架构: $(uname -m)"
+            echo "处理器: $(lscpu | grep "Model name" | cut -d: -f2 | sed 's/^ *//' || echo 'N/A')"
+            echo "处理器核心数: $(nproc)"
+            echo "系统运行时间: $(uptime -p | sed 's/up //')"
+            echo "最后启动时间: $(who -b | awk '{print $3 " " $4}')"
+            echo "当前用户: $(whoami)"
+            echo "用户权限: $(id -un) ($(id -u))"
+            echo "内存总量: $(free -h | awk 'NR==2{print $2}')"
+            echo "已用内存: $(free -h | awk 'NR==2{print $3}')"
+            echo "可用内存: $(free -h | awk 'NR==2{print $7}')"
+            echo "内存使用率: $(free | awk 'NR==2{printf "%.1f%%", $3/$2*100}')"
+            echo "交换空间: $(free -h | awk 'NR==3{print $2}')"
+            echo "磁盘总量: $(df -h / | awk 'NR==2{print $2}')"
+            echo "已用磁盘: $(df -h / | awk 'NR==2{print $3}')"
+            echo "可用磁盘: $(df -h / | awk 'NR==2{print $4}')"
+            echo "磁盘使用率: $(df -h / | awk 'NR==2{print $5}')"
+            echo "IP地址: $(hostname -I)"
+            echo "MAC地址: $(ip link show | grep -E '^[0-9]+:' | grep -v lo | head -1 | awk '{print $2}')"
+            echo "时区: $(timedatectl show --value -p Timezone 2>/dev/null || echo 'UTC')"
+            echo "区域设置: $(locale | grep LANG= | cut -d= -f2)"
+            if grep -q microsoft /proc/version 2>/dev/null; then
+                echo "环境: WSL (Windows Subsystem for Linux)"
+                echo "Windows 主机名: $(grep nameserver /etc/resolv.conf | awk '{print $2}')"
+                echo "WSL 版本: $(uname -r | grep -o 'WSL2' || echo 'WSL1')"
+            else
+                echo "环境: 原生 Linux"
+            fi
+            ;;
+        "-c")
+            echo "=== 处理器信息 ==="
+            if command -v lscpu >/dev/null 2>&1; then
+                echo "品牌: $(lscpu | grep "Vendor ID" | cut -d: -f2 | sed 's/^ *//')"
+                echo "型号: $(lscpu | grep "Model name" | cut -d: -f2 | sed 's/^ *//')"
+                echo "架构: $(lscpu | grep "Architecture" | cut -d: -f2 | sed 's/^ *//')"
+                echo "核心数: $(nproc)"
+                echo "状态: 驱动已安装，设备正在正常运行"
+            else
+                echo "状态: 无法获取处理器信息，请检查处理器是否正常工作或安装lscpu工具以获取信息"
+            fi
+            ;;
+        "-g")
+            echo "=== 显卡信息 ==="
+            local gpu_detected=false #尝试多种方法获取多种显卡的信息
+            if command -v lspci >/dev/null 2>&1; then #使用lspci显卡并提取型号
+                local gpu_info=$(lspci | grep -iE "vga|3d|display" | head -1)
+                if [ -n "$gpu_info" ]; then
+                    local gpu_model=$(echo "$gpu_info" | sed 's/.*: //') #从lspci提取显卡型号
+                    echo "设备: $gpu_model"
+                    gpu_detected=true
+                    if echo "$gpu_model" | grep -i "nvidia" >/dev/null; then #根据关键词判断品牌
+                        echo "显卡品牌: NVIDIA"
+                    elif echo "$gpu_model" | grep -i "amd" >/dev/null || echo "$gpu_model" | grep -i "ati" >/dev/null; then
+                        echo "显卡品牌: AMD"
+                    elif echo "$gpu_model" | grep -i "intel" >/dev/null; then
+                        echo "显卡品牌: Intel"
+                    else
+                        local brand=$(echo "$gpu_info" | grep -o -iE "nvidia|amd|ati|intel" | head -1) #从设备描述中提取品牌信息
+                        if [ -n "$brand" ]; then
+                            echo "显卡品牌: $(echo "$brand" | tr '[:lower:]' '[:upper:]')"
+                        fi
+                    fi
+                fi
+            fi
+            if command -v nvidia-smi >/dev/null 2>&1; then #检查英伟达显卡驱动状态
+                local nvidia_info=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+                if [ -n "$nvidia_info" ]; then
+                    echo "型号: $nvidia_info"
+                    echo "状态: 驱动已安装，设备正在正常运行"
+                    gpu_detected=true
+                fi
+            else
+                if lspci | grep -i nvidia >/dev/null 2>&1; then #检查是否存在英伟达显卡但无状态
+                    echo "品牌: NVIDIA"
+                    echo "状态: 检测到有英伟达显卡存在，但无法获取设备状态，请检查驱动是否正确"
+                    gpu_detected=true
+                fi
+            fi
+            
+            
+            if command -v lshw >/dev/null 2>&1; then #使用lshw获取更详细的显卡信息（如果可用）
+                local lshw_gpu=$(lshw -C display 2>/dev/null | head -10)
+                if [ -n "$lshw_gpu" ] && [ "$gpu_detected" = false ]; then
+                    echo "检测到的显卡:"
+                    echo "$lshw_gpu" | grep -E "(product|vendor|description):" | head -5
+                    gpu_detected=true
+                fi
+            fi
+            if [ -d "/sys/class/drm" ] && [ "$gpu_detected" = false ]; then #检查/sys/class/drm目录
+                local drm_cards=$(find /sys/class/drm -name "card*" -type l | grep -v "control" | sort)
+                for card in $drm_cards; do
+                    if [ -f "$card/device/uevent" ]; then
+                        local drm_vendor=$(grep "DRIVER" "$card/device/uevent" | head -1 | cut -d= -f2)
+                        local drm_product=$(grep "MODALIAS" "$card/device/uevent" | head -1 | cut -d= -f2)
+                        if [ -n "$drm_vendor" ]; then
+                            echo "DRM设备: $drm_vendor"
+                            if [ -n "$drm_product" ]; then
+                                echo "型号标识: $drm_product"
+                            fi
+                            gpu_detected=true
+                            break
+                        fi
+                    fi
+                done
+            fi
+            if [ "$gpu_detected" = false ]; then #如果未检测到任何显卡设备
+                echo "状态: 未检测到显卡设备，请检查设备和驱动是否正常工作"
+            else
+                # 如果已经检测到 GPU 但没有显示具体状态，显示默认状态
+                if ! echo "$(about -g)" | grep -q "状态:"; then
+                    echo "状态: 设备已识别，但未能检测到设备状态"
+                fi
+            fi
+            ;;
+        "-o")
+            echo "=== 操作系统信息 ==="
+            echo "系统类型: $(uname -s)"
+            echo "系统架构: $(uname -m)"
+            echo "内核版本: $(uname -r)"
+            echo "内核版本详细信息: $(uname -v)"
+            echo "发行版: $(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"')"
+            echo "发行版 ID: $(lsb_release -is 2>/dev/null || cat /etc/os-release | grep ^ID= | cut -d= -f2)"
+            echo "版本号: $(lsb_release -rs 2>/dev/null || cat /etc/os-release | grep VERSION_ID | cut -d= -f2 | tr -d '\"')"
+            echo "代码名称: $(lsb_release -cs 2>/dev/null || echo 'N/A')"
+            
+            if grep -q microsoft /proc/version 2>/dev/null; then
+                echo "环境: WSL (Windows Subsystem for Linux)"
+                echo "WSL 版本: $(uname -r | grep -o 'WSL2' || echo 'WSL1')"
+            else
+                echo "环境: 原生 Linux"
+            fi
+            
+            echo "启动方式: $(ps -p 1 -o comm=)"
+            echo "初始化系统: $(ps -p 1 -o comm=)"
+            ;;
+        "-s")
+            echo "=== 用户信息 ==="
+            echo "当前用户: $(whoami)"
+            echo "用户 ID: $(id -u)"
+            echo "组 ID: $(id -g)"
+            echo "所属组: $(id -Gn)"
+            echo "主目录: $HOME"
+            echo "Shell: $SHELL"
+            echo "登录终端: $(tty)"
+            echo "登录时间: $(who | grep $(whoami) | awk '{print $3 " " $4}')"
+            echo "sudo 权限: $(sudo -n true 2>/dev/null && echo "可用" || echo "不可用/需要密码")"
+            echo "最近登录:"
+            last -n 3 | head -4
+            ;;
+        "")
+            echo "=== 基本信息 ==="
+            echo "主机: $(hostname)"
+            echo "用户: $(whoami)"
+            echo "发行版: $(lsb_release -ds 2>/dev/null || echo 'Ubuntu 24.04')"
+            echo "内核: $(uname -r)"
+            echo "架构: $(uname -m)"
+            echo "运行时间: $(uptime -p | sed 's/up //')"
+            echo "内存总量: $(free -h | awk 'NR==2{print $2}')"
+            echo "已用内存: $(free -h | awk 'NR==2{print $3}')"
+            echo "可用内存: $(free -h | awk 'NR==2{print $7}')"
+            echo "内存使用率: $(free | awk 'NR==2{printf "%.1f%%", $3/$2*100}')"
+            echo "存储总量: $(df -h / | awk 'NR==2{print $2}')"
+            echo "已用存储: $(df -h / | awk 'NR==2{print $3}')"
+            echo "可用存储: $(df -h / | awk 'NR==2{print $4}')"
+            echo "存储使用率: $(df -h / | awk 'NR==2{print $5}')"
+            
+            if grep -q microsoft /proc/version 2>/dev/null; then
+                echo "环境: WSL"
+                echo "Windows 主机: $(grep nameserver /etc/resolv.conf | awk '{print $2}')"
+            else
+                echo "环境: 原生 Linux"
+            fi
+            ;;
+        *)
+            echo "about 命令用法:"
+            echo "  about       - 显示基本信息"
+            echo "  about -a    - 显示详细信息"
+            echo "  about -c    - 显示处理器信息"
+            echo "  about -g    - 显示显卡信息"
+            echo "  about -o    - 显示操作系统信息"
+            echo "  about -s    - 显示用户信息"
+            ;;
+    esac
+}
+command_list() {  #文件列表
+    ls -la "$ARGS"
+}
+command_network() { #查看网络
+    case "$ARGS" in
+        "-c")
+            echo "=== 网卡及连接情况 ==="
+            echo "网络接口列表:"
+            ip link show
+            echo ""
+            echo "IP地址信息:"
+            ip addr show
+            echo ""
+            echo "路由表:"
+            ip route show
+            echo ""
+            echo "网络连接:"
+            ss -tuln
+            ;;
+        "-i")
+            echo "=== 网络信息 ==="
+            echo "WSL IP: $(hostname -I)"
+            echo "Windows 主机: $(grep nameserver /etc/resolv.conf | awk '{print $2}')"
+            echo "网络接口:"
+            ip addr show | grep -E "^\s*[0-9]+:" | awk '{print $2}' | tr -d :
+            ;;
+        *)
+            echo "=== network 命令用法 ==="
+            echo "network -c : 显示所有网卡及连接情况（包括虚拟网卡）"
+            echo "network -i : 显示基本网络信息"
+            ;;
+    esac
+}
+command_disk() { #查看磁盘
+    echo "=== 磁盘使用情况 ==="
+    df -h | grep -v tmpfs
+    case "$ARGS" in
+        "-m")
+            # 硬盘挂载管理功能
+            # 检查root权限
+            if [ "$(id -u)" -ne 0 ]; then
+                echo "错误: 挂载操作需要 root 权限"
+                echo "请使用: sudo disk -m"
+                return 1
+            fi
+
+            echo "=== 硬盘挂载管理 ==="
+            
+            # 扫描所有块设备
+            echo "正在扫描存储设备..."
+            echo ""
+            
+            # 获取所有块设备信息（包括已挂载和未挂载的）
+            local devices=()
+            local device_info_list=()
+            local i=1
+            
+            while IFS= read -r line; do
+                if [ -n "$line" ]; then
+                    local device_name=$(echo "$line" | awk '{print $1}')
+                    local device_path="/dev/$device_name"
+                    
+                    # 获取详细设备信息
+                    local size=$(echo "$line" | awk '{print $2}')
+                    local fstype=$(echo "$line" | awk '{print $3}')
+                    local mountpoint=$(echo "$line" | awk '{print $4}')
+                    local label=$(echo "$line" | awk '{print $5}')
+                    local model=$(echo "$line" | awk '{print $6}')
+                    
+                    devices[$i]="$device_path"
+                    device_info_list[$i]="$size|$fstype|$mountpoint|$label|$model"
+                    
+                    if [ -z "$mountpoint" ] || [ "$mountpoint" = "" ]; then
+                        echo "  $i) $device_path - ${size} - $fstype - $label - $model - [未挂载]"
+                    else
+                        echo "  $i) $device_path - ${size} - $fstype - $label - $model - [已挂载: $mountpoint]"
+                    fi
+                    i=$((i + 1))
+                fi
+            done < <(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,LABEL,MODEL -r | grep -E "^(sd|nvme|vd)" | grep -v "├\|└")
+            
+            if [ $i -eq 1 ]; then
+                echo "未找到可用的存储设备"
+                return 1
+            fi
+            
+            echo ""
+            echo -n "请选择要操作的设备 (1-$((i-1))), 或输入 'q' 退出: "
+            read -r device_choice
+            
+            if [ "$device_choice" = "q" ] || [ "$device_choice" = "Q" ]; then
+                echo "操作已取消"
+                return 0
+            fi
+            
+            if [ "$device_choice" -lt 1 ] || [ "$device_choice" -ge $i ]; then
+                echo "错误: 无效的选择"
+                return 1
+            fi
+            
+            local selected_device="${devices[$device_choice]}"
+            local device_info="${device_info_list[$device_choice]}"
+            local size=$(echo "$device_info" | cut -d'|' -f1)
+            local fstype=$(echo "$device_info" | cut -d'|' -f2)
+            local mountpoint=$(echo "$device_info" | cut -d'|' -f3)
+            local label=$(echo "$device_info" | cut -d'|' -f4)
+            local model=$(echo "$device_info" | cut -d'|' -f5)
+            
+            # 检查设备是否已挂载
+            if [ -n "$mountpoint" ] && [ "$mountpoint" != "" ]; then
+                echo ""
+                echo "设备 $selected_device 已挂载到: $mountpoint"
+                echo "请选择操作:"
+                echo "  1) 卸载设备"
+                echo "  2) 重新挂载到其他位置"
+                echo "  3) 取消"
+                echo -n "请选择 (1-3): "
+                read -r operation_choice
+                
+                case "$operation_choice" in
+                    1)
+                        echo "正在卸载 $selected_device ..."
+                        if umount "$selected_device"; then
+                            echo "设备已成功卸载"
+                            
+                            # 检查是否为fstab中的永久挂载，如果是则询问是否删除
+                            if grep -q "$selected_device" /etc/fstab 2>/dev/null; then
+                                echo -n "检测到该设备在 /etc/fstab 中有永久挂载配置，是否删除? (y/N): "
+                                read -r remove_fstab
+                                if [ "$remove_fstab" = "y" ] || [ "$remove_fstab" = "Y" ]; then
+                                    sudo sed -i "\|$selected_device|d" /etc/fstab
+                                    echo "已从 /etc/fstab 中删除挂载配置"
+                                fi
+                            fi
+                        else
+                            echo "卸载失败，设备可能正在使用中"
+                        fi
+                        ;;
+                    2)
+                        # 先卸载设备
+                        echo "正在卸载 $selected_device ..."
+                        if ! umount "$selected_device"; then
+                            echo "卸载失败，无法重新挂载"
+                            return 1
+                        fi
+                        echo "设备已成功卸载"
+                        # 然后继续挂载流程
+                        ;;
+                    3)
+                        echo "操作已取消"
+                        return 0
+                        ;;
+                    *)
+                        echo "无效选择，操作已取消"
+                        return 1
+                        ;;
+                esac
+                
+                # 如果用户选择了取消或卸载，直接返回
+                if [ "$operation_choice" = "1" ] || [ "$operation_choice" = "3" ]; then
+                    return 0
+                fi
+                # 如果用户选择了重新挂载，继续执行下面的挂载流程
+            fi
+            
+            # 挂载流程 - 先询问挂载点
+            echo ""
+            echo "选择的设备: $selected_device"
+            echo ""
+            
+            # 询问挂载点
+            local default_mountpoint="/mnt/$(basename "$selected_device")"
+            echo -n "请输入挂载点路径 [默认: $default_mountpoint]: "
+            read -r mount_point
+            
+            if [ -z "$mount_point" ]; then
+                mount_point="$default_mountpoint"
+            fi
+            
+            # 显示设备信息
+            echo ""
+            echo "设备信息:"
+            echo "  文件系统: $fstype"
+            echo "  大小: $size"
+            echo "  标签: $label"
+            echo "  型号: $model"
+            echo "  挂载点: $mount_point"
+            echo ""
+            
+            # 创建挂载点目录
+            if [ ! -d "$mount_point" ]; then
+                echo -n "挂载点目录不存在，是否创建? (Y/n): "
+                read -r create_dir
+                if [ "$create_dir" != "n" ] && [ "$create_dir" != "N" ]; then
+                    mkdir -p "$mount_point"
+                    if [ $? -ne 0 ]; then
+                        echo "错误: 无法创建挂载点目录"
+                        return 1
+                    fi
+                    echo "已创建挂载点目录: $mount_point"
+                else
+                    echo "操作已取消"
+                    return 1
+                fi
+            fi
+            
+            # 检查挂载点是否为空
+            if [ "$(ls -A "$mount_point" 2>/dev/null)" ]; then
+                echo "警告: 挂载点目录 $mount_point 不为空"
+                echo -n "是否继续? (y/N): "
+                read -r continue_mount
+                if [ "$continue_mount" != "y" ] && [ "$continue_mount" != "Y" ]; then
+                    echo "操作已取消"
+                    return 1
+                fi
+            fi
+            
+            # 执行挂载
+            echo "正在挂载 $selected_device 到 $mount_point ..."
+            if mount "$selected_device" "$mount_point"; then
+                echo "设备已成功挂载"
+                
+                # 询问是否永久挂载
+                echo ""
+                echo -n "是否设置为永久挂载 (写入 /etc/fstab)? (y/N): "
+                read -r permanent_mount
+                
+                if [ "$permanent_mount" = "y" ] || [ "$permanent_mount" = "Y" ]; then
+                    local uuid=$(blkid -s UUID -o value "$selected_device")
+                    if [ -n "$uuid" ]; then
+                        local fstab_entry="UUID=$uuid $mount_point $fstype defaults 0 2"
+                        if ! grep -q "$uuid" /etc/fstab 2>/dev/null; then
+                            echo "$fstab_entry" | sudo tee -a /etc/fstab > /dev/null
+                            echo "已添加到 /etc/fstab (使用UUID: $uuid)"
+                        else
+                            echo "该设备已在 /etc/fstab 中存在"
+                        fi
+                    else
+                        echo "无法获取设备UUID，使用设备路径代替"
+                        local fstab_entry="$selected_device $mount_point $fstype defaults 0 2"
+                        if ! grep -q "$selected_device" /etc/fstab 2>/dev/null; then
+                            echo "$fstab_entry" | sudo tee -a /etc/fstab > /dev/null
+                            echo "已添加到 /etc/fstab (使用设备路径)"
+                        else
+                            echo "该设备已在 /etc/fstab 中存在"
+                        fi
+                    fi
+                else
+                    echo "此为临时挂载，重启后需要重新挂载"
+                fi
+                
+                # 显示挂载结果
+                echo ""
+                echo "挂载信息:"
+                df -h | grep "$mount_point"
+            else
+                echo "挂载失败，请检查设备状态和文件系统"
+            fi
+            ;;
+        *)
+            echo "=== 磁盘使用情况 ==="
+            df -h | grep -v tmpfs
+            echo ""
+            echo "使用 'disk -m' 管理硬盘挂载"
+            ;;
+    esac
+}
+command_ctime() {
+    echo "本地时间: $(date +"%Y-%m-%d %H:%M:%S.%N" | cut -c1-23)"
+    echo "标准格式: $(date)"
+    echo "UNIX时间戳: $(date +%s)"
+    local timezone_info=""
+    if command -v timedatectl >/dev/null 2>&1; then
+        timezone_info=$(timedatectl show --property=Timezone --value 2>/dev/null)
+    fi
+    
+    if [ -n "$timezone_info" ]; then
+        echo "系统时区: $timezone_info"
+    else
+        if [ -f /etc/timezone ]; then
+            timezone_info=$(cat /etc/timezone)
+            echo "系统时区: $timezone_info"
+        elif [ -h /etc/localtime ]; then
+            timezone_info=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+            echo "系统时区: $timezone_info"
+        else
+            echo "系统时区: 未知"
+        fi
+    fi
+    local offset=$(date +%z) #显示时区
+    if [ -n "$offset" ]; then
+        echo "时区: UTC${offset:0:3}:${offset:3:2}"
+    fi
+    echo "年-月-日: $(date +"%Y-%m-%d")" #显示详细的日期信息
+    echo "星期: $(date +"%A")"
+    echo "系统运行: $(uptime -p | sed 's/up //')"
+    if command -v timedatectl >/dev/null 2>&1; then
+        local ntp_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null)
+        if [ "$ntp_sync" = "yes" ]; then
+            echo "时间同步已启用(WSL环境下与Windows同步)"
+        else
+            echo "时间同步未启用"
+        fi
+    fi
+    if command -v hwclock >/dev/null 2>&1; then
+        echo "硬件时钟: $(hwclock --show 2>/dev/null | cut -d' ' -f1-7 || echo "无法读取")"
+    fi
+}
+command_process() { #查看当前正在运行的所有进程
+    case "$ARGS" in
+        "list")
+            echo "=== 进程列表 (前10个) ==="
+            ps aux --sort=-%cpu | head -11
+            ;;
+        "all")
+            ps aux
+            ;;
+        *)
+            echo "用法: process list|all"
+            ;;
+    esac
+}
+command_nkill() {
+    if [ "$(id -u)" -ne 0 ]; then #检查用户
+        echo "错误: nkill 命令必须在 root 用户下使用"
+        echo "请使用: sudo nkill [选项] <进程ID>"
+        return 1
+    fi
+    local option="" #解析参数
+    local pid=""
+    case "$ARGS" in #处理不同参数格式
+        -p\ *)
+            option="-p" #格式: nkill -p 114514
+            pid=$(echo "$ARGS" | awk '{print $2}')
+            ;;
+        -c\ *)
+            option="-c" #格式:nkill -c 114514
+            pid=$(echo "$ARGS" | awk '{print $2}')
+            ;;
+        -p*)
+            option="-p" #格式: nkill -p114514
+            pid="${ARGS#-p}"
+            ;;
+        -c*)
+            option="-c" #格式: nkill -c114514
+            pid="${ARGS#-c}"
+            ;;
+        *)
+            if [[ "$ARGS" =~ ^[0-9]+$ ]]; then #格式: nkill 114514 或 nkill -p 114514（已经处理过）
+                pid="$ARGS" #若为数字，直接作为PID
+            else
+                option="" #其他情况显示用法
+                pid=""
+            fi
+            ;;
+    esac
+    pid=$(echo "$pid" | tr -d '[:space:]') #去除PID中的空格，规避提取错误
+    if [ -z "$pid" ]; then #展示用法
+        echo "nkill 命令用法:"
+        echo "nkill <进程ID>     - 强制杀死进程"
+        echo "nkill -p <进程ID>  - 暂停进程工作"
+        echo "nkill -c <进程ID>  - 继续被暂停的进程"
+        echo "注意: 所有 nkill 命令必须在 root 用户下使用"
+        echo "示例:"
+        echo "nkill 114514"
+        echo "nkill -p 114514"
+        echo "nkill -p114514"
+        echo "nkill -c 114514"
+        return 1
+    fi
+    if ! [[ "$pid" =~ ^[0-9]+$ ]]; then #检查PID是否为数字
+        echo "错误: 进程ID必须是数字，当前输入: '$pid'"
+        return 1
+    fi
+    if ! ps -p "$pid" > /dev/null 2>&1; then #检查进程是否存在
+        echo "错误: 进程 $pid 不存在"
+        return 1
+    fi
+    case "$option" in #判定命令后缀，根据选项要求执行操作
+        "-p")
+            echo "警告: 您将要暂停进程 $pid" #暂停指定的进程
+            echo -n "确定要暂停此进程吗？(y/N): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                if kill -STOP "$pid"; then
+                    echo "已暂停进程: $pid"
+                else
+                    echo "暂停进程失败: $pid"
+                fi
+            else
+                echo "操作已取消"
+            fi
+            ;;
+        "-c")
+            echo "警告: 您将要继续进程 $pid" #继续被暂停的进程
+            echo -n "确定要继续此进程吗？(y/N): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                if kill -CONT "$pid"; then
+                    echo "继续进程: $pid"
+                else
+                    echo "继续进程失败: $pid"
+                fi
+            else
+                echo "操作已取消"
+            fi
+            ;;
+        *)
+            local process_info=$(ps -p "$pid" -o pid,user,comm,cmd --no-headers 2>/dev/null) #强制杀死进程
+            echo "警告: 您将要强制杀死进程 $pid"
+            echo "进程信息: $process_info"
+            echo -n "确定要强制杀死此进程吗？(y/N): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                if kill -9 "$pid"; then
+                    echo "已杀死进程: $pid"
+                else
+                    echo "杀死进程失败: $pid"
+                fi
+            else
+                echo "操作已取消"
+            fi
+            ;;
+    esac
+}
+command_open() {
+    if [ -z "$ARGS" ]; then
+        echo "open 命令用法:"
+        echo "  open <文件路径> - 在命令行环境中打开指定文件"
+        echo ""
+        echo "支持的文件类型:"
+        echo "  文本文件 (.txt, .log, .conf, .sh, .py, .js, .html, .css, .json, .xml 等)"
+        echo "  代码文件 (.c, .cpp, .java, .php, .rb, .go, .rs 等)"
+        echo "  配置文件 (.ini, .cfg, .yml, .yaml, .toml 等)"
+        echo "  文档文件 (.md, .rst, .tex 等)"
+        echo ""
+        echo "示例:"
+        echo "  open document.txt"
+        echo "  open script.sh"
+        echo "  open /etc/hosts"
+        return 1
+    fi
+    local file_path="$ARGS"
+    if [ ! -e "$file_path" ]; then
+        echo "文件 '$file_path' 不存在"
+        return 1
+    fi
+    if [ ! -f "$file_path" ]; then
+        echo "'$file_path' 不是文件，这可能是一个目录或不可用的位置"
+        return 1
+    fi
+    if [ ! -r "$file_path" ]; then
+        echo "您没有访问 '$file_path' 的权限"
+        return 1
+    fi
+    echo "正在打开: $file_path"
+    local file_type=$(file -b "$file_path" 2>/dev/null)
+    if [ $? -ne 0 ]; then
+        file_type="未知文件类型"
+    fi
+    if file "$file_path" | grep -q "text"; then
+        if command -v less >/dev/null 2>&1; then
+            less "$file_path"
+        elif command -v more >/dev/null 2>&1; then
+            more "$file_path"
+        elif command -v nano >/dev/null 2>&1; then
+            nano "$file_path"
+        elif command -v vim >/dev/null 2>&1; then
+            vim "$file_path"
+        elif command -v vi >/dev/null 2>&1; then
+            vi "$file_path"
+        else
+            cat "$file_path"
+        fi
+        return 0
+    else
+        echo "该文件类型不受支持"
+        echo "检测到的文件类型: $file_type"
+        return 1
+    fi
+}
+command_delete() {
+    if [ -z "$ARGS" ]; then
+        echo "delete 命令用法:"
+        echo "  delete <路径> - 删除指定的文件或目录"
+        echo ""
+        echo "注意: 删除操作不可逆，请谨慎使用"
+        echo ""
+        echo "示例:"
+        echo "  delete file.txt"
+        echo "  delete /path/to/directory"
+        echo "  delete /path/to/file"
+        return 1
+    fi
+    local target_path="$ARGS"
+        if [ ! -e "$target_path" ]; then
+        echo "错误: 路径 '$target_path' 不存在"
+        return 1
+    fi
+    local item_type=""
+    local item_info=""
+    
+    if [ -f "$target_path" ]; then
+        item_type="文件"
+        item_info="大小: $(du -h "$target_path" | cut -f1)"
+    elif [ -d "$target_path" ]; then
+        item_type="目录"
+        local file_count=$(find "$target_path" -type f 2>/dev/null | wc -l)
+        local dir_count=$(find "$target_path" -type d 2>/dev/null | wc -l)
+        item_info="包含: $file_count 个文件, $(($dir_count - 1)) 个子目录"
+    elif [ -L "$target_path" ]; then
+        item_type="符号链接"
+        item_info="指向: $(readlink "$target_path")"
+    else
+        item_type="特殊文件"
+    fi
+    echo "类型: $item_type"
+    echo "路径: $target_path"
+    if [ -n "$item_info" ]; then
+        echo "信息: $item_info"
+    fi
+    echo "警告: 此操作不可逆!"
+    echo -n "确定要删除吗？(y|N): "
+    read -r user_confirm
+    if [ "$user_confirm" != "y" ]; then
+        echo "操作已取消"
+        return 0
+    fi
+    echo "正在删除..."
+    if [ -f "$target_path" ] || [ -L "$target_path" ]; then
+        if rm -f "$target_path"; then
+            echo "已删除 $item_type: $target_path"
+        else
+            echo "删除失败: $target_path"
+            return 1
+        fi
+    elif [ -d "$target_path" ]; then
+        if rm -rf "$target_path"; then
+            echo "已删除目录: $target_path"
+        else
+            echo "删除目录失败: $target_path"
+            return 1
+        fi
+    else
+        echo "无法识别的文件类型: $target_path"
+        return 1
+    fi
+    return 0
+}
+command_new() {
+    if [ -z "$ARGS" ]; then
+        echo "new 命令用法:"
+        echo "new <路径> - 新建目录或文件"
+        return 1
+    fi
+    local target_path="$ARGS"
+    if [ -e "$target_path" ]; then #检查路径是否已存在
+        echo "路径 '$target_path' 已存在，无法重复创建"
+        return 1
+    fi
+    echo "路径: $target_path"
+    echo "请选择要创建的类型:"
+    echo " 1) 目录 (directory)"
+    echo " 2) 文件 (file)"
+    echo -n "请输入选项 (1 或 2): "
+    read -r user_choice
+    case "$user_choice" in #根据用户选择执行相应操作
+        1|directory|dir|d)
+            echo "正在创建目录..."
+            if mkdir -p "$target_path"; then
+                echo "已创建目录: $target_path"
+                
+                # 显示目录权限信息
+                local perm=$(stat -c "%a" "$target_path" 2>/dev/null || echo "未知")
+                echo "权限: $perm"
+            else
+                echo "创建目录失败: $target_path，可能该目录已存在或您没有访问其上级目录的权限"
+                return 1
+            fi
+            ;;
+        2|file|f)
+            echo "正在创建文件..."
+            local parent_dir=$(dirname "$target_path") #确保父目录存在
+            if [ ! -d "$parent_dir" ]; then
+                echo "父目录不存在，自动创建: $parent_dir"
+                mkdir -p "$parent_dir"
+            fi
+            if touch "$target_path"; then #创建空文件
+                echo "✓ 已创建文件: $target_path"
+                local perm=$(stat -c "%a" "$target_path" 2>/dev/null || echo "未知")
+                local size=$(du -h "$target_path" | cut -f1)
+                echo "权限: $perm"
+                echo "大小: $size"
+                echo ""
+                echo -n "是否立即编辑文件内容？(y/N): "
+                read -r edit_choice
+                if [ "$edit_choice" = "y" ] || [ "$edit_choice" = "Y" ]; then
+                    if command -v nano >/dev/null 2>&1; then
+                        nano "$target_path"
+                    elif command -v vim >/dev/null 2>&1; then
+                        vim "$target_path"
+                    elif command -v vi >/dev/null 2>&1; then
+                        vi "$target_path"
+                    else
+                        echo "未找到可用的文本编辑器"
+                    fi
+                fi
+            else
+                echo "创建文件失败: $target_path，您可能没有访问其目录的权限"
+                return 1
+            fi
+            ;;
+        *)
+            echo "无效的选择，操作已取消"
+            return 1
+            ;;
+    esac
+    
+    return 0
+}
+command_mod() {
+    if [ -z "$ARGS" ]; then
+        echo "mod 命令用法:"
+        echo "  mod <路径> - 修改文件或目录的属性"
+        echo ""
+        echo "可修改的属性:"
+        echo "  - 文件权限 (chmod)"
+        echo "  - 所有者和组 (chown)"
+        echo "  - 时间戳 (touch)"
+        echo "  - 重命名 (mv)"
+        echo ""
+        echo "示例:"
+        echo "  mod file.txt"
+        echo "  mod /path/to/directory"
+        echo "  mod script.sh"
+        return 1
+    fi
+    local target_path="$ARGS"
+    if [ ! -e "$target_path" ]; then
+        echo "错误: 路径 '$target_path' 不存在"
+        return 1
+    fi
+    echo "=== 当前属性 ==="
+    if [ -f "$target_path" ]; then
+        echo "类型: 文件"
+    elif [ -d "$target_path" ]; then
+        echo "类型: 目录"
+    elif [ -L "$target_path" ]; then
+        echo "类型: 符号链接"
+    else
+        echo "类型: 特殊文件"
+    fi
+    echo "路径: $target_path"
+    echo "权限: $(stat -c "%A (%a)" "$target_path" 2>/dev/null || echo "未知")"
+    echo "所有者: $(stat -c "%U:%G" "$target_path" 2>/dev/null || echo "未知")"
+    echo "大小: $(du -h "$target_path" | cut -f1)"
+    echo "修改时间: $(stat -c "%y" "$target_path" 2>/dev/null || echo "未知")"
+    echo "  1) 修改权限 (chmod)"
+    echo "  2) 修改所有者和组 (chown)"
+    echo "  3) 修改时间戳 (touch)"
+    echo "  4) 重命名/移动 (mv)"
+    echo "  5) 取消"
+    echo ""
+    echo -n "请选择操作 (1-5): "
+    read -r user_choice
+    case "$user_choice" in
+        1)
+            echo ""
+            echo "当前权限: $(stat -c "%A (%a)" "$target_path")"
+            echo ""
+            echo "权限示例:"
+            echo "  755 - 所有者:读/写/执行, 组:读/执行, 其他:读/执行"
+            echo "  644 - 所有者:读/写, 组:读, 其他:读"
+            echo "  777 - 所有用户:读/写/执行 (不推荐)"
+            echo ""
+            echo -n "请输入新的权限 (如 755): "
+            read -r new_perms
+            if [[ ! "$new_perms" =~ ^[0-7]{3,4}$ ]]; then
+                echo "错误: 无效的权限格式 '$new_perms'"
+                echo "权限必须是 3 或 4 位八进制数字 (如 755 或 0755)"
+                return 1
+            fi
+            echo -n "确认将 '$target_path' 的权限改为 $new_perms? (y/N): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                if chmod "$new_perms" "$target_path"; then
+                    echo "权限已修改: $(stat -c "%A (%a)" "$target_path")"
+                else
+                    echo "修改权限失败，可能需要 root 权限"
+                    echo "尝试使用: sudo chmod $new_perms '$target_path'"
+                fi
+            else
+                echo "操作已取消"
+            fi
+            ;;
+        2)
+            echo "当前所有者: $(stat -c "%U:%G" "$target_path")"
+            echo -n "请输入新的所有者 (格式: 用户:组 或 用户): "
+            read -r new_owner
+            if [[ ! "$new_owner" =~ ^[a-zA-Z0-9_.-]+(:[a-zA-Z0-9_.-]+)?$ ]]; then
+                echo "错误: 无效的所有者格式 '$new_owner'"
+                echo "格式应为: 用户名 或 用户名:组名"
+                return 1
+            fi
+            echo -n "确认将 '$target_path' 的所有者改为 $new_owner? (y/N): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                if chown "$new_owner" "$target_path"; then
+                    echo "所有者已修改: $(stat -c "%U:%G" "$target_path")"
+                else
+                    echo "修改所有者失败，可能需要 root 权限"
+                    echo "尝试使用: sudo chown $new_owner '$target_path'"
+                fi
+            else
+                echo "操作已取消"
+            fi
+            ;;
+        3)
+            echo "当前修改时间: $(stat -c "%y" "$target_path")"
+            echo "当前访问时间: $(stat -c "%x" "$target_path")"
+            echo "时间戳选项:"
+            echo "  1) 设置为当前时间"
+            echo "  2) 设置为特定时间"
+            echo "  3) 仅修改访问时间"
+            echo "  4) 仅修改修改时间"
+            echo -n "请选择时间戳操作 (1-4): "
+            read -r time_choic
+            case "$time_choice" in
+                1)
+                    if touch "$target_path"; then
+                        echo "时间戳已更新为当前时间"
+                        echo "新修改时间: $(stat -c "%y" "$target_path")"
+                    else
+                        echo "更新时间戳失败，请检查操作是否合法或您是否有修改权限"
+                    fi
+                    ;;
+                2)
+                    echo -n "请输入时间 (格式: YYYYMMDDhhmm.ss): "
+                    read -r specific_time
+                    if touch -t "$specific_time" "$target_path"; then
+                        echo "时间戳已设置为: $specific_time"
+                        echo "新修改时间: $(stat -c "%y" "$target_path")"
+                    else
+                        echo "设置时间戳失败，格式应为: YYYYMMDDhhmm.ss"
+                    fi
+                    ;;
+                3)
+                    if touch -a "$target_path"; then
+                        echo "访问时间已更新为当前时间"
+                        echo "新访问时间: $(stat -c "%x" "$target_path")"
+                    else
+                        echo "更新访问时间失败，请检查操作是否合法或您是否有修改权限"
+                    fi
+                    ;;
+                4)
+                    if touch -m "$target_path"; then
+                        echo "修改时间已更新为当前时间"
+                        echo "新修改时间: $(stat -c "%y" "$target_path")"
+                    else
+                        echo "更新修改时间失败，请检查操作是否合法或您是否有修改权限"
+                    fi
+                    ;;
+                *)
+                    echo "无效选择，操作已取消"
+                    ;;
+            esac
+            ;;
+        4)
+            echo "当前路径: $target_path"
+            echo -n "请输入新路径: "
+            read -r new_path
+            if [ -z "$new_path" ]; then
+                echo "错误: 新路径不能为空"
+                return 1
+            fi
+            if [ -e "$new_path" ]; then
+                echo "警告: '$new_path' 已存在"
+                echo -n "是否覆盖? (y/N): "
+                read -r overwrite
+                if [ "$overwrite" != "y" ] && [ "$overwrite" != "Y" ]; then
+                    echo "操作已取消"
+                    return 0
+                fi
+            fi
+            echo -n "确认将 '$target_path' 移动到 '$new_path'? (y/N): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                if mv "$target_path" "$new_path"; then
+                    echo "已移动/重命名: $new_path"
+                    target_path="$new_path"
+                else
+                    echo "移动/重命名失败，请检查操作是否合法或您是否有修改权限"
+                fi
+            else
+                echo "操作已取消"
+            fi
+            ;;
+        5)
+            echo "操作已取消"
+            return 0
+            ;;
+        *)
+            echo "无效选择，操作已取消"
+            return 1
+            ;;
+    esac
+    return 0
+}
+command_driver() {
+    local need_root=false
+    case "$ARGS" in
+        "-i"*|"-d"*)
+            need_root=true
+            ;;
+    esac
+    if [ "$need_root" = true ] && [ "$(id -u)" -ne 0 ]; then
+        echo "错误: 此操作需要 root 权限"
+        echo "请使用: sudo driver $ARGS"
+        return 1
+    fi
+    case "$ARGS" in
+                "-r")
+            echo "正在扫描所有驱动程序，请稍候..."
+            if [ ! -d "/lib/modules/$(uname -r)" ]; then
+                echo "警告: 未找到内核模块目录，可能在某些其他环境中（如容器）"
+                echo "将显示可用信息..."
+                echo ""
+            fi
+            local loaded_modules=()
+            if command -v lsmod >/dev/null 2>&1; then
+                loaded_modules=($(lsmod | awk 'NR>1 {print $1}'))
+                echo "发现 ${#loaded_modules[@]} 个已加载的驱动程序"
+                echo ""
+            else
+                echo "错误: lsmod 命令不可用"
+                return 1
+            fi
+            printf "%-25s | %-20s | %-25s | %-15s\n" "驱动名称" "发行商" "加载时间" "状态"
+            printf "%-25s-+-%-20s-+-%-25s-+-%-15s\n" "-------------------------" "--------------------" "-------------------------" "---------------"
+            local count=0
+            for module in "${loaded_modules[@]}"; do
+                local module_info=$(modinfo "$module" 2>/dev/null)
+                local vendor=$(echo "$module_info" | grep -i "vendor" | head -1 | cut -d: -f2- | sed 's/^ *//')
+                local description=$(echo "$module_info" | grep -i "description" | head -1 | cut -d: -f2- | sed 's/^ *//')
+                local license=$(echo "$module_info" | grep -i "license" | head -1 | cut -d: -f2- | sed 's/^ *//')
+                if [ -z "$vendor" ]; then
+                    if [ -n "$description" ]; then
+                        vendor="$description"
+                    elif [ -n "$license" ]; then
+                        vendor="License: $license"
+                    else
+                        vendor="未知"
+                    fi
+                fi
+                if [ ${#vendor} -gt 18 ]; then
+                    vendor="${vendor:0:18}.."
+                fi
+                local load_time=""
+                if [ -d "/sys/module/$module" ]; then
+                    load_time=$(stat -c %y "/sys/module/$module" 2>/dev/null | cut -d. -f1)
+                fi
+                if [ -z "$load_time" ]; then
+                    load_time="未知"
+                fi
+                local status="正常"
+                if dmesg | grep -i "error.*$module" >/dev/null 2>&1; then
+                    status="错误"
+                elif dmesg | grep -i "warn.*$module" >/dev/null 2>&1; then
+                    status="警告"
+                fi
+                printf "%-25s | %-20s | %-25s | %-15s\n" "$module" "$vendor" "$load_time" "$status"
+                count=$((count + 1))
+                if [ $count -eq 20 ]; then
+                    echo ""
+                    echo "已显示 20 个驱动程序，总共 ${#loaded_modules[@]} 个..."
+                    echo -n "按 Enter 继续显示，或输入 'q' 退出: "
+                    read -r user_input
+                    if [ "$user_input" = "q" ] || [ "$user_input" = "Q" ]; then
+                        echo "显示已终止"
+                        break
+                    fi
+                    printf "%-25s | %-20s | %-25s | %-15s\n" "驱动名称" "发行商" "加载时间" "状态"
+                    printf "%-25s-+-%-20s-+-%-25s-+-%-15s\n" "-------------------------" "--------------------" "-------------------------" "---------------"
+                fi
+            done
+            echo "已加载驱动程序: ${#loaded_modules[@]} 个"
+            local available_modules=()
+            if command -v modprobe >/dev/null 2>&1 && [ -d "/lib/modules/$(uname -r)" ]; then
+                available_modules=($(find /lib/modules/$(uname -r) -name "*.ko" -exec basename {} .ko \; 2>/dev/null))
+                local loaded_count=${#loaded_modules[@]}
+                local available_count=${#available_modules[@]}
+                local not_loaded_count=$((available_count - loaded_count))
+                echo "可用驱动程序: $available_count 个"
+                echo "未成功加载驱动程序: $not_loaded_count 个"
+                echo "若在WSL环境中，无法正常扫描驱动属正常现象"
+                if [ $not_loaded_count -gt 0 ]; then
+                    local displayed=0
+                    for module in "${available_modules[@]}"; do
+                        if [[ ! " ${loaded_modules[@]} " =~ " ${module} " ]]; then
+                            printf "%s " "$module"
+                            displayed=$((displayed + 1))
+                            if [ $displayed -ge 10 ]; then
+                                break
+                            fi
+                        fi
+                    done
+                    echo ""
+                    echo "... 还有更多未加载驱动"
+                fi
+            fi
+            echo ""
+            echo "使用 'modinfo <驱动名称>' 查看详细驱动信息"
+            ;;
+        "-i")
+            if command -v ubuntu-drivers >/dev/null 2>&1; then
+                echo "正在检测可用驱动..."
+                ubuntu-drivers devices
+                echo ""
+                echo "正在安装推荐的驱动..."
+                sudo ubuntu-drivers autoinstall
+                echo "驱动安装完成，建议重启系统"
+            elif command -v apt >/dev/null 2>&1; then
+                echo "使用 apt 安装通用驱动..."
+                echo "正在更新软件包列表..."
+                sudo apt update
+                echo ""
+                echo "安装硬件支持包..."
+                sudo apt install -y linux-firmware firmware-linux-free firmware-linux-nonfree
+                echo ""
+                echo "安装常用驱动..."
+                sudo apt install -y alsa-base pulseaudio
+                echo "基础驱动安装完成"
+            else
+                echo "错误: 未找到可用的驱动管理工具"
+                echo "请手动安装驱动或检查系统包管理器"
+            fi
+            ;;
+        -i*)
+            local driver_name="${ARGS#-i}"
+            if [ -z "$driver_name" ]; then
+                echo "错误: 未指定驱动名称"
+                echo "用法: driver -i<驱动名称>"
+                return 1
+            fi
+            if modinfo "$driver_name" >/dev/null 2>&1; then
+                echo "驱动 $driver_name 已存在于系统中"
+                echo "尝试加载驱动..."
+                if sudo modprobe "$driver_name"; then
+                    echo "驱动 $driver_name 加载成功"
+                else
+                    echo "驱动 $driver_name 加载失败"
+                fi
+                return 0
+            fi
+            if command -v apt >/dev/null 2>&1; then
+                echo "正在搜索驱动包..."
+                local pkg_name=""
+                case "$driver_name" in
+                    *nvidia*)
+                        pkg_name="nvidia-driver-535"
+                        ;;
+                    *amd*|*radeon*)
+                        pkg_name="xserver-xorg-video-radeon"
+                        ;;
+                    *intel*)
+                        pkg_name="xserver-xorg-video-intel"
+                        ;;
+                    *broadcom*|*bcm*)
+                        pkg_name="bcmwl-kernel-source"
+                        ;;
+                    *realtek*|*rtl*)
+                        pkg_name="firmware-realtek"
+                        ;;
+                    *)
+                        pkg_name="$driver_name"
+                        ;;
+                esac
+                echo "尝试安装包: $pkg_name"
+                if sudo apt install -y "$pkg_name"; then
+                    echo "驱动安装完成"
+                    echo "尝试加载驱动..."
+                    if sudo modprobe "$driver_name" 2>/dev/null; then
+                        echo "驱动 $driver_name 加载成功"
+                    else
+                        echo "驱动安装完成但加载失败，可能需要重启"
+                    fi
+                else
+                    echo "驱动安装失败"
+                    echo "请检查驱动名称或手动安装"
+                fi
+            else
+                echo "错误: 不支持的包管理器"
+                echo "请手动安装驱动: $driver_name"
+            fi
+            ;;
+        -d*)
+            local driver_name="${ARGS#-d}"
+            if [ -z "$driver_name" ]; then
+                echo "错误: 未指定驱动名称"
+                echo "用法: driver -d<驱动名称>"
+                return 1
+            fi
+            echo "删除驱动: $driver_name ==="
+            if lsmod | grep -q "$driver_name"; then
+                echo "正在卸载驱动模块..."
+                if sudo modprobe -r "$driver_name"; then
+                    echo "驱动模块已卸载"
+                else
+                    echo "驱动模块卸载失败，可能有其他模块共同使用"
+                    echo "尝试强制卸载..."
+                    if sudo rmmod "$driver_name"; then
+                        echo "驱动模块已强制卸载"
+                    else
+                        echo "强制卸载失败，请手动卸载"
+                    fi
+                fi
+            else
+                echo "驱动 $driver_name 未加载"
+            fi
+            if command -v apt >/dev/null 2>&1; then
+                echo "通过 apt 查找相关包..."
+                local pkg_name=$(dpkg -l | grep -i "$driver_name" | awk '{print $2}' | head -1)
+                
+                if [ -n "$pkg_name" ]; then
+                    echo "找到相关包: $pkg_name"
+                    echo -n "确认删除此包? (y/N): "
+                    read -r confirm
+                    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                        sudo apt remove -y "$pkg_name"
+                        echo "包 $pkg_name 已删除"
+                    else
+                        echo "包删除已取消"
+                    fi
+                else
+                    echo "未找到与 $driver_name 相关的安装包"
+                fi
+            else
+                echo "注意: 仅卸载了驱动模块，未删除安装包"
+            fi
+            ;;
+        "")
+            echo "已加载的内核模块:"
+            if command -v lsmod >/dev/null 2>&1; then
+                lsmod | awk 'NR<=20 {printf "  %-30s %s\n", $1, $3}'
+            else
+                echo "  lsmod 命令不可用"
+            fi
+            echo "设备驱动信息:"
+            if command -v lspci >/dev/null 2>&1; then
+                local gpu_driver=$(lspci -k | grep -A 2 -i "VGA\|3D" | grep "Kernel driver" | cut -d: -f2 | sed 's/^ *//')
+                if [ -n "$gpu_driver" ]; then
+                    echo "  显卡驱动: $gpu_driver"
+                else
+                    echo "  显卡驱动: 未检测到"
+                fi
+            fi
+            if [ -d "/proc/asound" ]; then
+                local sound_driver=$(cat /proc/asound/version 2>/dev/null | head -1)
+                if [ -n "$sound_driver" ]; then
+                    echo "  声卡驱动: $sound_driver"
+                else
+                    echo "  声卡驱动: **^#%"
+                fi
+            fi
+            if command -v ethtool >/dev/null 2>&1; then
+                local net_interfaces=$(ip link show | grep -E "^[0-9]+:" | grep -v lo | awk -F: '{print $2}' | sed 's/^ *//')
+                for iface in $net_interfaces; do
+                    local driver=$(ethtool -i "$iface" 2>/dev/null | grep driver | cut -d: -f2 | sed 's/^ *//')
+                    if [ -n "$driver" ]; then
+                        echo "  网络接口 $iface: $driver"
+                    fi
+                done
+            fi
+            echo "使用 'driver -r' 扫描所有硬件驱动"
+            echo "使用 'driver -i' 自动安装缺失的驱动"
+            ;;
+        *)
+            echo "driver 命令用法:"
+            echo "  driver         - 列出当前已安装的驱动程序"
+            echo "  driver -r      - 扫描所有硬件驱动（已安装和缺失的）"
+            echo "  driver -i      - 自动安装缺失的驱动"
+            echo "  driver -i<名称> - 安装指定的驱动"
+            echo "  driver -d<名称> - 删除指定的驱动"
+            echo ""
+            echo "示例:"
+            echo "  driver"
+            echo "  driver -r"
+            echo "  driver -i"
+            echo "  driver -invidia"
+            echo "  driver -dbcmwl"
+            ;;
+    esac
+    
+    return 0
+}
+command_backup() {
+    local backup_config="$HOME/.mycommands/backup_config"
+    local backup_log="$HOME/.mycommands/backup.log"
+    mkdir -p "$(dirname "$backup_config")"
+    echo "请选择备份类型:"
+    echo "  1) 完全备份 - 备份所有文件"
+    echo "  2) 增量备份 - 只备份上次备份后修改的文件"
+    echo "  3) 差异备份 - 备份上次完全备份后修改的文件"
+    echo "  4) 查看备份历史"
+    echo "  5) 恢复备份"
+    echo -n "请选择 (1-5): "
+    read -r backup_choice
+    case "$backup_choice" in
+        1|2|3)
+            echo ""
+            echo -n "请输入要备份的源目录路径: "
+            read -r source_dir
+            if [ ! -d "$source_dir" ]; then
+                echo "错误: 源目录 '$source_dir' 不存在"
+                return 1
+            fi
+            echo -n "请输入备份存储目录路径: "
+            read -r backup_dir
+            if [ ! -d "$backup_dir" ]; then
+                echo -n "备份目录不存在，是否创建? (y/N): "
+                read -r create_dir
+                if [ "$create_dir" = "y" ] || [ "$create_dir" = "Y" ]; then
+                    mkdir -p "$backup_dir" || {
+                        echo "错误: 无法创建备份目录"
+                        return 1
+                    }
+                else
+                    echo "操作已取消"
+                    return 1
+                fi
+            fi
+            local backup_type=""
+            case "$backup_choice" in
+                1) backup_type="full" ;;
+                2) backup_type="incremental" ;;
+                3) backup_type="differential" ;;
+            esac
+            local timestamp=$(date +"%Y%m%d_%H%M%S")
+            local backup_name="backup_${backup_type}_${timestamp}"
+            local backup_path="$backup_dir/$backup_name"
+            mkdir -p "$backup_path" || {
+                echo "错误: 无法创建备份目录 '$backup_path'，请注意权限"
+                return 1
+            }
+            echo "开始备份..."
+            echo "源目录: $source_dir"
+            echo "备份到: $backup_path"
+            echo "备份类型: $backup_type"
+            local backup_count=0
+            local total_size=0
+            case "$backup_type" in
+                "full")   
+                    echo "执行完全备份..."
+                    while IFS= read -r -d '' file; do
+                        if [ -f "$file" ]; then
+                            local rel_path="${file#$source_dir/}"
+                            local target_dir="$backup_path/$(dirname "$rel_path")"
+                            mkdir -p "$target_dir"
+                            if cp -p "$file" "$backup_path/$rel_path" 2>/dev/null; then
+                                backup_count=$((backup_count + 1))
+                                local file_size=$(stat -c%s "$file" 2>/dev/null || echo "0")
+                                total_size=$((total_size + file_size))
+                                printf "\r已备份: %d 个文件, 总大小: %.2f MB" "$backup_count" "$(echo "scale=2; $total_size/1024/1024" | bc -q 2>/dev/null || echo "0")"
+                            fi
+                        fi
+                    done < <(find "$source_dir" -type f -print0 2>/dev/null)
+                    ;;
+                "incremental")
+                    echo "执行增量备份..."
+                    local last_backup_time=""
+                    if [ -f "$backup_log" ]; then
+                        last_backup_time=$(grep "BACKUP_COMPLETED" "$backup_log" | tail -1 | cut -d'|' -f3)
+                    fi
+                    if [ -z "$last_backup_time" ]; then
+                        echo "警告: 未找到上次备份记录，已自动执行执行完全备份"
+                        backup_type="full"
+                        command_backup
+                        return 0
+                    fi
+                    while IFS= read -r -d '' file; do
+                        if [ -f "$file" ]; then
+                            local file_mtime=$(stat -c%Y "$file" 2>/dev/null)
+                            if [ "$file_mtime" -gt "$last_backup_time" ]; then
+                                local rel_path="${file#$source_dir/}"
+                                local target_dir="$backup_path/$(dirname "$rel_path")"
+                                mkdir -p "$target_dir"
+                                if cp -p "$file" "$backup_path/$rel_path" 2>/dev/null; then
+                                    backup_count=$((backup_count + 1))
+                                    local file_size=$(stat -c%s "$file" 2>/dev/null || echo "0")
+                                    total_size=$((total_size + file_size))
+                                    printf "\r已备份: %d 个文件, 总大小: %.2f MB" "$backup_count" "$(echo "scale=2; $total_size/1024/1024" | bc -q 2>/dev/null || echo "0")"
+                                fi
+                            fi
+                        fi
+                    done < <(find "$source_dir" -type f -print0 2>/dev/null)
+                    ;;
+                "differential")
+                    echo "执行差异备份..."
+                    local last_full_backup_time=""
+                    if [ -f "$backup_log" ]; then
+                        last_full_backup_time=$(grep "full.*BACKUP_COMPLETED" "$backup_log" | tail -1 | cut -d'|' -f3)
+                    fi
+                    
+                    if [ -z "$last_full_backup_time" ]; then
+                        echo "警告: 未找到完全备份记录，执行完全备份"
+                        backup_type="full"
+                        command_backup
+                        return 0
+                    fi
+                    while IFS= read -r -d '' file; do
+                        if [ -f "$file" ]; then
+                            local file_mtime=$(stat -c%Y "$file" 2>/dev/null)
+                            if [ "$file_mtime" -gt "$last_full_backup_time" ]; then
+                                local rel_path="${file#$source_dir/}"
+                                local target_dir="$backup_path/$(dirname "$rel_path")"
+                                mkdir -p "$target_dir"
+                                if cp -p "$file" "$backup_path/$rel_path" 2>/dev/null; then
+                                    backup_count=$((backup_count + 1))
+                                    local file_size=$(stat -c%s "$file" 2>/dev/null || echo "0")
+                                    total_size=$((total_size + file_size))
+                                    printf "\r已备份: %d 个文件, 总大小: %.2f MB" "$backup_count" "$(echo "scale=2; $total_size/1024/1024" | bc -q 2>/dev/null || echo "0")"
+                                fi
+                            fi
+                        fi
+                    done < <(find "$source_dir" -type f -print0 2>/dev/null)
+                    ;;
+            esac
+            echo "备份完成!"
+            echo "备份位置: $backup_path"
+            echo "备份文件数: $backup_count"
+            echo "总大小: $(echo "scale=2; $total_size/1024/1024" | bc -q 2>/dev/null || echo "0") MB"
+            local log_time=$(date +%s)
+            echo "$(date '+%Y-%m-%d %H:%M:%S')|$backup_type|$log_time|$source_dir|$backup_path|$backup_count|$total_size|BACKUP_COMPLETED" >> "$backup_log"
+            ;;
+        4)
+            if [ -f "$backup_log" ]; then
+                printf "%-19s | %-12s | %-30s | %-8s | %s\n" "时间" "类型" "源目录" "文件数" "备份位置"
+                printf "%-19s-+-%-12s-+-%-30s-+-%-8s-+-%s\n" "-------------------" "------------" "------------------------------" "--------" "------------------------------"
+                while IFS='|' read -r date type time source target count size status; do
+                    if [ "$status" = "BACKUP_COMPLETED" ]; then
+                        local short_source=$(echo "$source" | cut -c1-30)
+                        local short_target=$(basename "$target")
+                        printf "%-19s | %-12s | %-30s | %-8s | %s\n" "$date" "$type" "$short_source" "$count" "$short_target"
+                    fi
+                done < "$backup_log"
+            else
+                echo "暂无备份记录"
+            fi
+            ;;
+        5)
+            if [ ! -f "$backup_log" ]; then
+                echo "错误: 未找到备份记录"
+                return 1
+            fi
+            echo "可恢复的备份:"
+            local i=1
+            local restore_options=()
+            while IFS='|' read -r date type time source target count size status; do
+                if [ "$status" = "BACKUP_COMPLETED" ]; then
+                    echo "  $i) $date - $type - $source -> $(basename "$target")"
+                    restore_options[$i]="$target|$source"
+                    i=$((i + 1))
+                fi
+            done < "$backup_log"
+            
+            if [ $i -eq 1 ]; then
+                echo "没有可恢复的备份"
+                return 1
+            fi
+            echo -n "请选择要恢复的备份 (1-$((i-1))): "
+            read -r restore_choice
+            
+            if [ "$restore_choice" -lt 1 ] || [ "$restore_choice" -ge $i ]; then
+                echo "错误: 无效的选择"
+                return 1
+            fi
+            local restore_info="${restore_options[$restore_choice]}"
+            local restore_target=$(echo "$restore_info" | cut -d'|' -f1)
+            local restore_source=$(echo "$restore_info" | cut -d'|' -f2)
+            echo "恢复信息:"
+            echo "  备份位置: $restore_target"
+            echo "  恢复到: $restore_source"
+            echo -n "确认恢复? 此操作将覆盖现有文件! (y/N): "
+            read -r confirm_restore
+            if [ "$confirm_restore" != "y" ] && [ "$confirm_restore" != "Y" ]; then
+                echo "恢复已取消"
+                return 0
+            fi
+            echo "开始恢复..."
+            local restore_count=0
+            if [ -d "$restore_target" ]; then
+                while IFS= read -r -d '' file; do
+                    if [ -f "$file" ]; then
+                        local rel_path="${file#$restore_target/}"
+                        local target_path="$restore_source/$rel_path"
+                        local target_dir="$(dirname "$target_path")"
+                        
+                        mkdir -p "$target_dir"
+                        if cp -p "$file" "$target_path" 2>/dev/null; then
+                            restore_count=$((restore_count + 1))
+                            printf "\r已恢复: %d 个文件" "$restore_count"
+                        fi
+                    fi
+                done < <(find "$restore_target" -type f -print0 2>/dev/null)
+                echo ""
+                echo "恢复完成! 共恢复 $restore_count 个文件"
+            else
+                echo "错误: 备份目录不存在"
+            fi
+            ;;
+        *)
+            echo "无效选择"
+            return 1
+            ;;
+    esac
+    return 0
+}
+command_check() {
+    case "$ARGS" in
+        "-f")
+            echo -n "请输入代码文件路径: "
+            read -r code_file
+            if [ -z "$code_file" ]; then
+                echo "错误: 未指定文件路径"
+                return 1
+            fi
+            if [ ! -f "$code_file" ]; then
+                echo "错误: 文件 '$code_file' 不存在"
+                return 1
+            fi
+            if [ ! -r "$code_file" ]; then
+                echo "错误: 没有读取 '$code_file' 的权限"
+                return 1
+            fi
+            echo "正在检查: $code_file"
+            local extension="${code_file##*.}"
+            extension=$(echo "$extension" | tr '[:upper:]' '[:lower:]')
+            case "$extension" in
+                "sh"|"bash")
+                    echo "检查 Shell 脚本格式..."
+                    if command -v shellcheck >/dev/null 2>&1; then
+                        shellcheck "$code_file"
+                        local shellcheck_result=$?
+                        if [ $shellcheck_result -eq 0 ]; then
+                            echo "Shell 脚本格式正确"
+                        else
+                            echo "Shell 脚本存在格式问题"
+                        fi
+                    else
+                        echo "提示: 安装 shellcheck 可以获得更详细的检查"
+                        echo "sudo apt install shellcheck"
+                        echo "基础语法检查:"
+                        if bash -n "$code_file" 2>/dev/null; then
+                            echo "基础语法正确"
+                        else
+                            echo "基础语法错误"
+                            bash -n "$code_file"
+                        fi
+                    fi
+                    ;;
+                "py")
+                    echo "检查 Python 代码格式..."
+                    if command -v python3 >/dev/null 2>&1; then
+                        if python3 -m py_compile "$code_file" 2>/dev/null; then
+                            echo "Python 语法正确"
+                            local pyc_file="${code_file}c"
+                            [ -f "$pyc_file" ] && rm -f "$pyc_file"
+                        else
+                            echo "Python 语法错误"
+                            python3 -m py_compile "$code_file"
+                        fi
+                    else
+                        echo "错误: 未找到 python3"
+                    fi
+                    if command -v flake8 >/dev/null 2>&1; then
+                        echo ""
+                        echo "PEP8 格式检查:"
+                        flake8 "$code_file" --max-line-length=120
+                    fi
+                    ;;
+                "js")
+                    echo "检查 JavaScript 代码格式..."
+                    if command -v node >/dev/null 2>&1; then
+                        if node -c "$code_file" 2>/dev/null; then
+                            echo "JavaScript 语法正确"
+                        else
+                            echo "JavaScript 语法错误"
+                            node -c "$code_file"
+                        fi
+                    else
+                        echo "错误: 未找到 Node.js"
+                    fi
+                    ;;
+                "json")
+                    echo "检查 JSON 格式..."
+                    if command -v python3 >/dev/null 2>&1; then
+                        if python3 -m json.tool "$code_file" >/dev/null 2>&1; then
+                            echo "JSON 格式正确"
+                        else
+                            echo "JSON 格式错误"
+                            python3 -m json.tool "$code_file"
+                        fi
+                    elif command -v jq >/dev/null 2>&1; then
+                        if jq . "$code_file" >/dev/null 2>&1; then
+                            echo "JSON 格式正确"
+                        else
+                            echo "JSON 格式错误"
+                            jq . "$code_file"
+                        fi
+                    else
+                        echo "提示: 安装 jq 或 python3 可以获得 JSON 格式检查"
+                    fi
+                    ;;
+                "xml")
+                    echo "检查 XML 格式..."
+                    if command -v xmllint >/dev/null 2>&1; then
+                        if xmllint --noout "$code_file" 2>/dev/null; then
+                            echo "XML 格式正确"
+                        else
+                            echo "XML 格式错误"
+                            xmllint --noout "$code_file"
+                        fi
+                    else
+                        echo "提示: 安装 xmllint 可以获得 XML 格式检查"
+                        echo "      sudo apt install libxml2-utils"
+                    fi
+                    ;;
+                "html"|"htm")
+                    echo "检查 HTML 格式..."
+                    if command -v tidy >/dev/null 2>&1; then
+                        echo "HTML 检查结果:"
+                        tidy -q -errors "$code_file" 2>/dev/null
+                        local tidy_result=$?
+                        if [ $tidy_result -eq 0 ]; then
+                            echo "HTML 格式基本正确"
+                        elif [ $tidy_result -eq 1 ]; then
+                            echo "HTML 存在警告"
+                        else
+                            echo "HTML 存在错误"
+                        fi
+                    else
+                        echo "提示: 安装 tidy 可以获得 HTML 格式检查"
+                        echo "      sudo apt install tidy"
+                    fi
+                    ;;
+                "css")
+                    echo "检查 CSS 格式..."
+                    if command -v csslint >/dev/null 2>&1; then
+                        csslint "$code_file" --quiet 2>/dev/null
+                        local csslint_result=$?
+                        if [ $csslint_result -eq 0 ]; then
+                            echo "CSS 格式正确"
+                        else
+                            echo "CSS 存在格式问题"
+                        fi
+                    else
+                        echo "提示: 安装 csslint 可以获得 CSS 格式检查"
+                        echo "sudo npm install -g csslint"
+                    fi
+                    ;;
+                *)
+                    echo "不支持检查 '$extension' 格式的文件"
+                    echo "支持的文件类型: sh, py, js, json, xml, html, css"
+                    ;;
+            esac
+            ;;
+        "")
+            echo -n "请输入文件路径: "
+            read -r file_path
+            if [ -z "$file_path" ]; then
+                echo "错误: 未指定文件路径"
+                return 1
+            fi
+            if [ ! -f "$file_path" ]; then
+                echo "错误: 文件 '$file_path' 不存在"
+                return 1
+            fi
+            if [ ! -r "$file_path" ]; then
+                echo "错误: 没有读取 '$file_path' 的权限"
+                return 1
+            fi
+            echo "正在检查: $file_path"
+            local file_info=$(file -b "$file_path" 2>/dev/null)
+            if [ $? -eq 0 ]; then
+                echo "文件类型: $file_info"
+            else
+                echo "文件类型: 未知"
+            fi
+            local file_size=$(stat -c%s "$file_path" 2>/dev/null || echo "未知")
+            echo "文件大小: $file_size 字节"
+            echo ""
+            echo "编码分析:"
+            local first_bytes=$(head -c 3 "$file_path" | od -An -tx1 | tr -d ' \n')
+            if [ "$first_bytes" = "efbbbf" ]; then
+                echo "UTF-8 with BOM"
+            else
+                echo "无BOM头"
+            fi
+            if grep -q -P "[^\x00-\x7F]" "$file_path" 2>/dev/null; then
+                echo "包含非法ASCII字符"
+                if command -v uchardet >/dev/null 2>&1; then
+                    local detected_encoding=$(uchardet "$file_path" 2>/dev/null)
+                    echo "检测编码: $detected_encoding"
+                elif command -v enca >/dev/null 2>&1; then
+                    local detected_encoding=$(enca -L none "$file_path" 2>/dev/null | head -1)
+                    echo "检测编码: $detected_encoding"
+                else
+                    echo "提示: 安装 uchardet 或 enca 可以获得更准确的编码检测"
+                fi
+            else
+                echo "纯ASCII文本"
+            fi
+            echo "行尾符检查:"
+            local crlf_count=$(grep -c -U $'\x0D' "$file_path" 2>/dev/null || echo "0")
+            local lf_count=$(grep -c -U $'\x0A' "$file_path" 2>/dev/null || echo "0")
+            
+            if [ "$crlf_count" -gt 0 ] && [ "$lf_count" -gt 0 ]; then
+                echo "混合行尾符 (CRLF+LF)"
+            elif [ "$crlf_count" -gt 0 ]; then
+                echo "Windows 行尾符 (CRLF)"
+            elif [ "$lf_count" -gt 0 ]; then
+                echo "Unix 行尾符 (LF)"
+            else
+                echo "无行尾符或空文件"
+            fi
+            local blank_lines=$(grep -c '^$' "$file_path" 2>/dev/null || echo "0")
+            echo "空行数量: $blank_lines"
+            local last_char=$(tail -c 1 "$file_path" | od -An -tx1 | tr -d ' \n')
+            if [ "$last_char" = "0a" ]; then
+                echo "以换行符结束"
+            else
+                echo "未以换行符结束"
+            fi
+            echo ""
+            echo "文件预览 (前10行):"
+            echo "----------------------------------------"
+            head -10 "$file_path" 2>/dev/null | cat -A
+            echo "----------------------------------------"
+            ;;
+        *)
+            echo "check 命令用法:"
+            echo "  check         - 检查文件编码格式"
+            echo "  check -f      - 检查代码文件格式"
+            echo ""
+            echo "示例:"
+            echo "  check         # 检查文件编码"
+            echo "  check -f      # 检查代码格式"
+            ;;
+    esac
+    return 0
+}
+command_download() {
+    if [ -z "$ARGS" ]; then
+        echo "download 命令用法:"
+        echo "download+URL-网络资源下载"
+        echo "支持的协议: http, https, ftp"
+        echo "工具程序会自动择取下载效率最高的下载方式"
+        echo "所有依赖工具已由全局系统自动安装"
+        echo "示例:"
+        echo "download https://example.com/file.zip"
+        echo "download ftp://ftp.example.com/file.tar.gz"
+        return 1
+    fi
+    local URL="$ARGS"
+    local filename=$(basename "$URL" | sed 's/?.*//')
+    if [ -z "$filename" ] || [ "$filename" = "/" ]; then
+        filename="downloaded_file_$(date +%Y%m%d_%H%M%S)"
+    fi
+    echo "目标文件名: $filename"
+    if [ -f "$filename" ]; then
+        echo "警告: 文件 '$filename' 已存在"
+        echo -n "您希望覆盖现有的文件吗? [y/N]: "
+        read -r overwrite
+        if [ "$overwrite" != "y" ] && [ "$overwrite" != "Y" ]; then
+            local counter=1
+            while [ -f "${filename}.${counter}" ]; do
+                counter=$((counter + 1))
+            done
+            filename="${filename}.${counter}"
+        fi
+    fi
+    local selected_tool="" #WGET/CURL/FRP
+    local tool_args=""
+    if [[ "$URL" =~ ^ftp:// ]]; then
+        if command -v curl >/dev/null 2>&1; then
+            selected_tool="curl"
+            tool_args="-u anonymous:anonymous -o"
+        elif command -v ftp >/dev/null 2>&1; then
+            selected_tool="ftp"
+        else
+            echo "错误: 没有可用的FTP客户端，下载已终止"
+            return 1
+        fi
+    else
+        if command -v aria2c >/dev/null 2>&1; then #HTTP/HTTPS
+            selected_tool="aria2c"
+            tool_args="-x 4 -s 4 -k 1M --summary-interval=0 -o"
+        elif command -v axel >/dev/null 2>&1; then
+            selected_tool="axel"
+            tool_args="-n 4 -a -o"
+        elif command -v wget >/dev/null 2>&1; then
+            selected_tool="wget"
+            tool_args="-c --progress=bar:force -O"
+        elif command -v curl >/dev/null 2>&1; then
+            selected_tool="curl"
+            tool_args="-L -C - -o"
+        else
+            echo "错误: 未找到任何下载工具"
+            echo "提示: 全局依赖系统正在安装，请稍后重试"
+            return 1
+        fi
+    fi
+    echo "将使用的下载工具: $selected_tool"
+    echo "开始下载..."
+    local start_time=$(date +%s)
+    local download_result=0 #开始下载
+    case "$selected_tool" in
+        "aria2c")
+            aria2c $tool_args "$filename" "$URL"
+            download_result=$?
+            ;;
+        "axel")
+            axel $tool_args "$filename" "$URL"
+            download_result=$?
+            ;;
+        "wget")
+            wget $tool_args "$filename" "$URL"
+            download_result=$?
+            ;;
+        "curl")
+            if [[ "$URL" =~ ^ftp:// ]]; then
+                curl -u anonymous:anonymous -o "$filename" "$URL"
+            else
+                curl -L -C - -o "$filename" "$URL"
+            fi
+            download_result=$?
+            ;;
+        "ftp")
+            local ftp_host=$(echo "$URL" | sed 's|ftp://||' | cut -d/ -f1)
+            local ftp_path="/$(echo "$URL" | sed 's|ftp://[^/]*/||')"
+            echo "正在连接FTP服务器: $ftp_host"
+            echo "下载文件: $ftp_path"
+            curl -u anonymous:anonymous -o "$filename" "$URL"
+            download_result=$?
+            ;;
+        *)
+            echo "错误: 未知下载工具/无法处理的URL"
+            return 1
+            ;;
+    esac
+    local end_time=$(date +%s)
+    local duration=$((end_time - start_time))
+    if [ $download_result -eq 0 ]; then
+        echo "下载成功!您可以通过"open"命令直接打开"
+        if [ -f "$filename" ]; then
+            local file_size=$(stat -c%s "$filename" 2>/dev/null || echo "0")
+            local size_display=""
+            
+            if [ "$file_size" -ge 1073741824 ]; then
+                size_display=$(echo "scale=2; $file_size/1073741824" | bc)" GB"
+            elif [ "$file_size" -ge 1048576 ]; then
+                size_display=$(echo "scale=2; $file_size/1048576" | bc)" MB"
+            elif [ "$file_size" -ge 1024 ]; then
+                size_display=$(echo "scale=2; $file_size/1024" | bc)" KB"
+            else
+                size_display="$file_size 字节"
+            fi
+            local speed=""
+            if [ $duration -gt 0 ]; then
+                local speed_bps=$((file_size / duration))
+                if [ $speed_bps -ge 1048576 ]; then
+                    speed=$(echo "scale=2; $speed_bps/1048576" | bc)" MB/s"
+                elif [ $speed_bps -ge 1024 ]; then
+                    speed=$(echo "scale=2; $speed_bps/1024" | bc)" KB/s"
+                else
+                    speed="$speed_bps B/s"
+                fi
+            fi
+            echo "文件信息:"
+            echo "  大小: $size_display"
+            echo "  位置: $(pwd)/$filename"
+            echo "  耗时: ${duration}秒"
+            [ -n "$speed" ] && echo "  平均速度: $speed"
+            if command -v file >/dev/null 2>&1; then
+                local file_type=$(file -b "$filename" 2>/dev/null | head -c 60)
+                echo "  类型: $file_type"
+            fi
+        fi
+    else
+        echo "下载失败-错误码: $download_result)"
+        if [ $download_result -eq 4 ]; then #有可能是这些错误？？？
+            echo "网络错误: 无法连接服务器"
+        elif [ $download_result -eq 6 ]; then
+            echo "URL错误: 无法解析主机名"
+        elif [ $download_result -eq 22 ]; then
+            echo "HTTP错误: 404 - 文件不存在"
+        fi
+        if [ -f "$filename" ] && [ $(stat -c%s "$filename" 2>/dev/null || echo 0) -lt 1024 ]; then
+            rm -f "$filename"
+            echo "已删除损坏的文件片段"
+        fi
+    fi
+    return $download_result
+}
+command_search() {
+    if [ -z "$ARGS" ]; then
+        echo "search 命令用法:"
+        echo "search <文件名>              -在整个系统中搜索文件"
+        echo "search <路径> <文件名>        -在指定路径中搜索文件"
+        echo ""
+        echo "搜索选项:"
+        echo "-t <类型>     文件类型: f(文件), d(目录), l(链接)"
+        echo "-u <用户>     按所有者搜索"
+        echo "-g <组>       按所属组搜索"
+        echo "-s <大小>     按大小搜索 (+大于, -小于, 单位: k,M,G)"
+        echo "-m <天数>     按修改时间搜索 (+超过, -以内)"
+        echo ""
+        echo "示例:"
+        echo "search myfile.txt                   #全局搜索文件"
+        echo "search /home/user myfile.txt        #在指定目录搜索"
+        echo "search -t f myfile.txt              #只搜索普通文件"
+        echo "search -u root myfile.txt           #搜索root用户的文件"
+        echo "search -s +10M largefile            #搜索大于10MB的文件（文件大小可修改）"
+        echo "search -m -7 recent_file            #搜索7天内修改的文件"
+        return 1
+    fi
+    local search_path=""
+    local search_name=""
+    local find_options=""
+    local use_locate=false
+    local args_array=($ARGS)
+    local i=0
+    local arg_count=${#args_array[@]}
+    while [ $i -lt $arg_count ]; do
+        case "${args_array[i]}" in
+            -t|--type)
+                if [ $((i+1)) -lt $arg_count ]; then
+                    local type_char="${args_array[i+1]}"
+                    case "$type_char" in
+                        f) find_options="$find_options -type f" ;;
+                        d) find_options="$find_options -type d" ;;
+                        l) find_options="$find_options -type l" ;;
+                        *) echo "错误: 无效的文件类型 '$type_char'，请使用 f, d 或 l" && return 1 ;;
+                    esac
+                    i=$((i+2))
+                else
+                    echo "错误: -t 选项需要参数"
+                    return 1
+                fi
+                ;;
+            -u|--user)
+                if [ $((i+1)) -lt $arg_count ]; then
+                    find_options="$find_options -user ${args_array[i+1]}"
+                    i=$((i+2))
+                else
+                    echo "错误: -u 选项需要参数"
+                    return 1
+                fi
+                ;;
+            -g|--group)
+                if [ $((i+1)) -lt $arg_count ]; then
+                    find_options="$find_options -group ${args_array[i+1]}"
+                    i=$((i+2))
+                else
+                    echo "错误: -g 选项需要参数"
+                    return 1
+                fi
+                ;;
+            -s|--size)
+                if [ $((i+1)) -lt $arg_count ]; then
+                    find_options="$find_options -size ${args_array[i+1]}"
+                    i=$((i+2))
+                else
+                    echo "错误: -s 选项需要参数"
+                    return 1
+                fi
+                ;;
+            -m|--mtime)
+                if [ $((i+1)) -lt $arg_count ]; then
+                    find_options="$find_options -mtime ${args_array[i+1]}"
+                    i=$((i+2))
+                else
+                    echo "错误: -m 选项需要参数"
+                    return 1
+                fi
+                ;;
+            -l|--locate)
+                use_locate=true
+                i=$((i+1))
+                ;;
+            *)
+                if [ -z "$search_path" ] && [ -d "${args_array[i]}" ]; then #这是啥？
+                    search_path="${args_array[i]}"
+                    i=$((i+1))
+                else
+                    search_name="${args_array[i]}"
+                    for ((j=i+1; j<arg_count; j++)); do
+                        if [[ "${args_array[j]}" != -* ]]; then
+                            search_name="$search_name ${args_array[j]}"
+                        else
+                            break
+                        fi
+                    done
+                    i=$arg_count
+                fi
+                ;;
+        esac
+    done
+    if [ -z "$search_name" ]; then
+        echo "错误: 请指定要搜索的文件名"
+        return 1
+    fi
+    if [ -z "$search_path" ]; then
+        if [ "$use_locate" = true ] && command -v locate >/dev/null 2>&1; then
+            echo "使用 locate 进行全局搜索 (更快但需要更新数据库)..."
+            if locate -b "$search_name" 2>/dev/null | head -100; then
+                echo ""
+                echo "提示: 使用 'sudo updatedb' 更新locate数据库以获得最新结果"
+            else
+                echo "未找到文件或locate数据库需要更新"
+            fi
+        else
+            echo "使用 find 进行全局搜索 (可能需要较长时间)..."
+            echo "正在搜索: $search_name"
+            echo "========================================"
+            sudo find / \
+                -path /proc -prune -o \
+                -path /sys -prune -o \
+                -path /dev -prune -o \
+                -path /run -prune -o \
+                -path /tmp -prune -o \
+                -name "*$search_name*" \
+                $find_options \
+                -print 2>/dev/null | head -200
+            
+            echo "========================================"
+            echo "提示: 全局搜索可能需要较长时间，可以指定路径缩小搜索范围"
+        fi
+    else
+        if [ ! -d "$search_path" ]; then
+            echo "错误: 路径 '$search_path' 不存在或不是目录"
+            return 1
+        fi
+        echo "在目录 '$search_path' 中搜索: $search_name"
+        echo "========================================"
+        find "$search_path" \
+            -name "*$search_name*" \
+            $find_options \
+            -print 2>/dev/null
+        
+        echo "========================================"
+        local result_count=$(find "$search_path" \
+            -name "*$search_name*" \
+            $find_options \
+            -print 2>/dev/null | wc -l)
+        
+        echo "找到 $result_count 个匹配项"
+    fi
+    return 0
+}
+command_sai() {
+    #检查依赖
+    for cmd in curl jq; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            echo "发生错误：缺乏必要命令，请等待工具自动安装完成后使用"
+            return 1
+        fi
+    done
+    #配置
+    local config_file="$HOME/.ucst_sai_config"
+    local base_url="https://email.coludai.cn"
+    #检查CA
+    if [ ! -f "$config_file" ]; then
+        echo "未找到 CA 配置"
+        echo "请使用'account -s'命令设置并验证您的 CA"
+        return 1
+    fi
+    source "$config_file" 2>/dev/null
+    if [ -z "$ca" ]; then
+        echo "配置文件中的 CA 为空，请检查或修改"
+        return 1
+    fi
+    #尝试创建新会话
+    local session_id=""
+    echo "正在初始化..."
+    local session_response
+    session_response=$(curl -s -X POST "${base_url}/api/session/create" \
+        -H "Content-Type: application/json" \
+        -H "ca: $ca" \
+        -d "{}" 2>/dev/null) #不传name，使用默认sessionid
+    if session_id=$(echo "$session_response" | jq -r '.sessionid' 2>/dev/null) && [ -n "$session_id" ]; then
+        echo "会话已创建，ID: ${session_id:0:8}..."
+    else
+        echo "未能创建新会话"
+        echo "调试信息: $session_response"
+        session_id=""
+    fi
+    #聊天主循环
+    echo "===SAI-Coder-会话进程==="
+    echo "请直接输入您的问题。输入'quit'退出，输入'new'重置会话"
+    local current_interface="chat" # 或 "coder"
+    local user_input=""
+    while true; do
+        printf "您: "
+        read -r user_input
+        case "$user_input" in
+            "quit"|"exit")
+                break
+                ;;
+            "-n")
+                #删除旧会话并创建新的
+                if [ -n "$session_id" ]; then
+                    curl -s -X POST "${base_url}/api/session/delete" \
+                        -H "Content-Type: application/json" \
+                        -H "ca: $ca" \
+                        -d "{\"sessionid\":\"$session_id\"}" >/dev/null 2>/dev/null
+                fi
+                session_response=$(curl -s -X POST "${base_url}/api/session/create" \
+                    -H "Content-Type: application/json" \
+                    -H "ca: $ca" \
+                    -d "{}" 2>/dev/null)
+                session_id=$(echo "$session_response" | jq -r '.sessionid' 2>/dev/null)
+                if [ -n "$session_id" ]; then
+                    echo "新会话已创建，会话ID: ${session_id:0:8}..."
+                else
+                    echo "新建会话失败"
+                    session_id=""
+                fi
+                continue
+                ;;
+            "switch")
+                if [ "$current_interface" = "chat" ]; then
+                    current_interface="coder"
+                else
+                    current_interface="chat"
+                fi
+                continue
+                ;;
+            "")
+                echo "输入不能为空"
+                continue
+                ;;
+        esac
+        #根据文档规则动态生成token
+        local current_date=$(date +"%Y-%m-%d")
+        local date_md5=$(echo -n "$current_date" | md5sum | awk '{print $1}' | cut -c 1-6)
+        local combined_str="${user_input}${date_md5}"
+        local dynamic_token=$(echo -n "$combined_str" | md5sum | awk '{print $1}')
+        local json_payload
+        local api_path
+        if [ "$current_interface" = "chat" ]; then
+            api_path="/api/chat"
+            json_payload=$(jq -n \
+                --arg prompt "$user_input" \
+                --arg token "$dynamic_token" \
+                --arg sessionid "${session_id:-}" \
+                '{
+                    prompt: $prompt,
+                    token: $token,
+                    stream: false,
+                    sessionid: (if $sessionid == "" then null else $sessionid end)
+                }')
+        else
+            api_path="/api/chat/coder"
+            #SAI-coder接口的token相同算法
+            json_payload=$(jq -n \
+                --arg prompt "$user_input" \
+                --arg token "$dynamic_token" \
+                '{
+                    prompt: $prompt,
+                    token: $token,
+                    stream: false,
+                    sysprompt: ""
+                }')
+        fi
+        printf "思考中... "
+        #发送请求
+        local api_response
+        local primary_success=false
+        api_response=$(curl -s -X POST "${base_url}${api_path}" \
+            -H "ca: $ca" \
+            -H "Content-Type: application/json" \
+            -d "$json_payload" 2>/dev/null)
+        #响应处理
+        if output=$(echo "$api_response" | jq -r '.output' 2>/dev/null) && [ -n "$output" ] && [ "$output" != "null" ]; then
+            printf "\nSAI: "
+            echo "$output"
+        else
+            #主接口失败时自己换接口
+            local fallback_path
+            local fallback_payload
+            if [ "$current_interface" = "chat" ]; then
+                fallback_path="/api/chat/coder"
+                fallback_payload=$(jq -n \
+                    --arg prompt "$user_input" \
+                    --arg token "$dynamic_token" \
+                    '{
+                        prompt: $prompt,
+                        token: $token,
+                        stream: false,
+                        sysprompt: ""
+                    }')
+            else
+                fallback_path="/api/chat"
+                fallback_payload=$(jq -n \
+                    --arg prompt "$user_input" \
+                    --arg token "$dynamic_token" \
+                    --arg sessionid "${session_id:-}" \
+                    '{
+                        prompt: $prompt,
+                        token: $token,
+                        stream: false,
+                        sessionid: (if $sessionid == "" then null else $sessionid end)
+                    }')
+            fi
+            api_response=$(curl -s -X POST "${base_url}${fallback_path}" \
+                -H "ca: $ca" \
+                -H "Content-Type: application/json" \
+                -d "$fallback_payload" 2>/dev/null)
+            if output=$(echo "$api_response" | jq -r '.output' 2>/dev/null) && [ -n "$output" ] && [ "$output" != "null" ]; then
+                printf "\nSAI (备用接口): "
+                echo "$output"
+            else
+                echo "错误: 无法获取响应"
+            fi
+        fi
+    done
+    #退出时清理会话
+    if [ -n "$session_id" ]; then
+        curl -s -X POST "${base_url}/api/session/delete" \
+            -H "Content-Type: application/json" \
+            -H "ca: $ca" \
+            -d "{\"sessionid\":\"$session_id\"}" >/dev/null 2>/dev/null
+    fi
+    echo "会话结束，进程已退出"
+}
+#!/bin/bash
+# UCST工具 - 修正token生成问题
+
+# ========== 基础配置 ==========
+export LC_ALL=C.UTF-8 2>/dev/null
+export LANG=C.UTF-8 2>/dev/null
+
+# ========== 工具函数 ==========
+_cmd_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# ========== 根据Python代码修正的token生成函数 ==========
+_generate_token() {
+    local prompt="$1"
+    
+    # 1. 获取当前日期，格式如："2024-06-23"
+    local current_date=$(date +"%Y-%m-%d")
+    
+    # 2. 将日期使用md5加密，取前六位（32位小写）
+    local date_md5=$(echo -n "$current_date" | md5sum | awk '{print $1}')
+    local date_md5_six="${date_md5:0:6}"
+    
+    # 3. 将刚刚的值加到输入的"prompt"值后面，构成新的字符串
+    local combined_str="${prompt}${date_md5_six}"
+    
+    # 4. 使用md5加密，作为token（32位小写）
+    local token=$(echo -n "$combined_str" | md5sum | awk '{print $1}')
+    
+    echo "$token"
+}
+
+# ========== account命令修正版 ==========
+# ========== account 命令修复版 ==========
+command_account() {
+    local config_file="$HOME/.ucst_sai_config"
+    local action="$1"
+    
+    local LOGIN_URL="https://email.coludai.cn"
+    local API_URL="https://ai.coludai.cn"
+
+    case "$action" in
+        "-s"|"--set")
+            echo "=== coludai账户登录与CA设置 ==="
+            
+            # 步骤1: 获取账号信息
+            local username=""
+            local password=""
+            
+            echo "请输入您的coludai账户信息"
+            echo -n "用户名: "
+            read -r username
+            echo -n "密码: "
+            read -s -r password
+            echo ""
+            
+            if [ -z "$username" ] || [ -z "$password" ]; then
+                echo "账号或密码不能为空"
+                return 1
+            fi
+            
+            # 步骤2: 直接获取CA令牌
+            echo ""
+            echo "请从coludai账户页面获取CA令牌"
+            echo "CA是使用AI功能的必需凭证"
+            echo -n "请输入CA: "
+            read -r user_ca
+            
+            if [ -z "$user_ca" ]; then
+                echo "CA不能为空"
+                return 1
+            fi
+            
+            # 步骤3: 验证CA有效性
+            echo "正在验证CA有效性"
+            
+            local test_prompt="test"
+            local test_token=$(_generate_token_for_api "$test_prompt")
+            
+            echo "生成测试token: $test_token"
+            
+            local ca_valid=false
+            local temp_response
+            local http_status
+            local response_body
+            
+            # 尝试API连接
+            echo "尝试连接到API"
+            
+            # 使用临时文件存储响应
+            temp_response=$(mktemp)
+            
+            # 发送请求，状态码单独一行
+            curl -s -X POST \
+                "${API_URL}/api/chat" \
+                -H "Content-Type: application/json" \
+                -H "ca: ${user_ca}" \
+                -d "{\"prompt\":\"$test_prompt\",\"token\":\"$test_token\",\"stream\":false}" \
+                --connect-timeout 10 \
+                --max-time 30 \
+                -o "$temp_response" \
+                -w "%{http_code}"
+            
+            # 读取HTTP状态码（curl -w的输出在标准错误？不，-w输出到标准输出，但被-o重定向到文件？）
+            # 实际上，-w的输出是追加到响应体后面的，所以我们需要从文件中分离
+            
+            # 重新执行curl，分别获取响应体和状态码
+            temp_response=$(mktemp)
+            local http_code
+            
+            # 执行curl并捕获状态码
+            http_code=$(curl -s -X POST \
+                "${API_URL}/api/chat" \
+                -H "Content-Type: application/json" \
+                -H "ca: ${user_ca}" \
+                -d "{\"prompt\":\"$test_prompt\",\"token\":\"$test_token\",\"stream\":false}" \
+                --connect-timeout 10 \
+                --max-time 30 \
+                -o "$temp_response" \
+                -w "%{http_code}")
+            
+            echo "HTTP状态码: $http_code"
+            
+            if [ "$http_code" = "200" ]; then
+                response_body=$(cat "$temp_response")
+                if echo "$response_body" | jq -e '.output' >/dev/null 2>&1; then
+                    local chat_output=$(echo "$response_body" | jq -r '.output')
+                    if [ -n "$chat_output" ] && [ "$chat_output" != "null" ]; then
+                        ca_valid=true
+                        echo "CA验证成功"
+                    else
+                        echo "API返回空输出"
+                    fi
+                else
+                    echo "响应格式错误"
+                    echo "响应内容: $response_body"
+                fi
+            else
+                echo "连接失败, HTTP状态码: $http_code"
+                response_body=$(cat "$temp_response" 2>/dev/null)
+                echo "响应内容: $response_body"
+            fi
+            
+            rm -f "$temp_response"
+            
+            if [ "$ca_valid" = false ]; then
+                # 显示调试信息
+                echo ""
+                echo "调试信息:"
+                echo "CA: ${user_ca:0:20}..."
+                echo "Prompt: $test_prompt"
+                echo "Token: $test_token"
+                echo ""
+                echo "手动测试命令:"
+                echo "curl -X POST 'https://ai.coludai.cn/api/chat' \\"
+                echo "  -H 'Content-Type: application/json' \\"
+                echo "  -H 'ca: ${user_ca}' \\"
+                echo "  -d '{\"prompt\":\"test\",\"token\":\"$test_token\",\"stream\":false}'"
+                echo ""
+                
+                echo -n "是否继续保存配置 [y/N]: "
+                read -r force_save
+                if [ "$force_save" != "y" ] && [ "$force_save" != "Y" ]; then
+                    echo "操作已取消"
+                    return 1
+                fi
+                ca_valid=true
+            fi
+            
+            # 步骤4: 保存配置
+            local encoded_pw=$(echo -n "$password" | base64 | tr -d '\n')
+            
+            {
+                echo "# UCST配置文件 - 生成于 $(date '+%Y-%m-%d %H:%M:%S')"
+                echo "username='$username'"
+                echo "password='$encoded_pw'"
+                echo "ca='$user_ca'"
+                echo "login_url='$LOGIN_URL'"
+                echo "api_url='$API_URL'"
+                echo "last_update='$(date +%s)'"
+            } > "$config_file"
+            
+            chmod 600 "$config_file"
+            
+            echo ""
+            echo "配置保存成功"
+            echo "文件: $config_file"
+            echo "用户: $username"
+            echo "CA: ${user_ca:0:12}..."
+            
+            # 立即测试
+            echo ""
+            echo -n "是否立即测试配置 [Y/n]: "
+            read -r test_now
+            if [ "$test_now" != "n" ] && [ "$test_now" != "N" ]; then
+                command_account "-t"
+            fi
+            ;;
+            
+        "-i"|"--info")
+            if [ ! -f "$config_file" ]; then
+                echo "未找到配置文件, 请使用 'account -s' 设置账户"
+                return 1
+            fi
+            
+            echo "=== 账户信息 ==="
+            echo ""
+            
+            echo "配置文件: $config_file"
+            echo "修改时间: $(stat -c %y "$config_file" 2>/dev/null || echo '未知')"
+            echo ""
+            
+            # 安全显示配置
+            while IFS= read -r line; do
+                case "$line" in
+                    username=*)
+                        echo "用户名: ${line#username=}" | sed "s/'//g"
+                        ;;
+                    ca=*)
+                        local ca_val=${line#ca=}
+                        ca_val=$(echo "$ca_val" | sed "s/'//g")
+                        echo "CA令牌: ${ca_val:0:12}...${ca_val: -8}"
+                        ;;
+                    api_url=*)
+                        echo "API地址: ${line#api_url=}" | sed "s/'//g"
+                        ;;
+                    login_url=*)
+                        echo "登录地址: ${line#login_url=}" | sed "s/'//g"
+                        ;;
+                    last_update=*)
+                        local ts=${line#last_update=}
+                        ts=$(echo "$ts" | sed "s/'//g")
+                        echo "最后更新: $(date -d "@$ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo '未知')"
+                        ;;
+                esac
+            done < "$config_file"
+            ;;
+            
+        "-t"|"--test")
+            echo "=== API连接测试 ==="
+            
+            if [ ! -f "$config_file" ]; then
+                echo "未找到配置文件"
+                return 1
+            fi
+            
+            # 读取配置
+            local config_ca=$(grep '^ca=' "$config_file" | cut -d"'" -f2 2>/dev/null)
+            local config_api_url=$(grep '^api_url=' "$config_file" | cut -d"'" -f2 2>/dev/null)
+            
+            if [ -z "$config_ca" ]; then
+                echo "未配置CA"
+                return 1
+            fi
+            
+            if [ -z "$config_api_url" ]; then
+                config_api_url="https://ai.coludai.cn"
+            fi
+            
+            echo "API服务器: $config_api_url"
+            echo "测试CA: ${config_ca:0:12}..."
+            echo ""
+            
+            # 测试1: 网络连接
+            echo "1 测试网络连接"
+            local domain=$(echo "$config_api_url" | sed 's|https*://||' | sed 's|/.*||')
+            if ping -c 1 -W 2 "$domain" >/dev/null 2>&1; then
+                echo "   网络连接正常"
+            else
+                echo "   网络连接失败"
+            fi
+            
+            # 测试2: 聊天API
+            echo ""
+            echo "2 测试聊天API"
+            local test_prompt="你是谁"
+            local test_token=$(_generate_token_for_api "$test_prompt")
+            
+            echo "   Prompt: $test_prompt"
+            echo "   Token: $test_token"
+            
+            local temp_file=$(mktemp)
+            local http_code
+            
+            http_code=$(curl -s -X POST \
+                "${config_api_url}/api/chat" \
+                -H "Content-Type: application/json" \
+                -H "ca: ${config_ca}" \
+                -d "{\"prompt\":\"$test_prompt\",\"token\":\"$test_token\",\"stream\":false}" \
+                --connect-timeout 10 \
+                -o "$temp_file" \
+                -w "%{http_code}")
+            
+            echo "   HTTP状态码: $http_code"
+            
+            if [ "$http_code" = "200" ]; then
+                if jq -e '.output' "$temp_file" >/dev/null 2>&1; then
+                    local output=$(jq -r '.output' "$temp_file")
+                    echo "   成功"
+                    echo "   回复: ${output:0:80}"
+                else
+                    local error=$(jq -r '.detail // "未知错误"' "$temp_file" 2>/dev/null)
+                    echo "   失败"
+                    echo "   错误: $error"
+                fi
+            else
+                echo "   失败, HTTP状态码: $http_code"
+                if [ -s "$temp_file" ]; then
+                    echo "   响应: $(head -c 200 "$temp_file")"
+                fi
+            fi
+            
+            rm -f "$temp_file"
+            
+           # 测试3: Coder API
+            echo ""
+            echo "3 测试Coder API"
+            
+            local coder_prompt="print hello"
+            local coder_token=$(_generate_token_for_api "$coder_prompt")
+            
+            temp_file=$(mktemp)
+            
+            http_code=$(curl -s -X POST \
+                "${config_api_url}/api/chat/coder" \
+                -H "Content-Type: application/json" \
+                -H "ca: ${config_ca}" \
+                -d "{\"prompt\":\"$coder_prompt\",\"token\":\"$coder_token\",\"stream\":false,\"sysprompt\":\"\"}" \
+                --connect-timeout 10 \
+                -o "$temp_file" \
+                -w "%{http_code}")
+            
+            echo "   HTTP状态码: $http_code"
+            
+            if [ "$http_code" = "200" ]; then
+                if jq -e '.output' "$temp_file" >/dev/null 2>&1; then
+                    local output=$(jq -r '.output' "$temp_file")
+                    echo "   成功"
+                    echo "   回复: ${output:0:80}"
+                else
+                    local error=$(jq -r '.detail // "未知错误"' "$temp_file" 2>/dev/null)
+                    echo "   失败"
+                    echo "   错误: $error"
+                fi
+            else
+                echo "   失败, HTTP状态码: $http_code"
+                if [ -s "$temp_file" ]; then
+                    echo "   响应: $(head -c 200 "$temp_file")"
+                fi
+            fi
+            
+            rm -f "$temp_file"
+            ;;
+            
+        *)
+            echo "account 命令用法"
+            echo "  account -s   - 登录并设置账户"
+            echo "  account -i   - 查看账户信息"
+            echo "  account -t   - 测试API连接"
+            echo ""
+            echo "注意"
+            echo "  - 如果登录接口失败, 请直接输入CA令牌"
+            echo "  - CA可从coludai账户页面获取"
+            echo "  - API地址默认使用 https://ai.coludai.cn"
+            return 1
+            ;;
+    esac
+    
+    return 0
+}
+
+# ========== 正确的token生成函数 ==========
+_generate_token_for_api() {
+    local prompt="$1"
+    
+    # 1 获取当前日期，格式: YYYY-MM-DD
+    local current_date=$(date +"%Y-%m-%d")
+    
+    # 2 将日期使用md5加密，取前六位（32位小写）
+    local date_md5=$(echo -n "$current_date" | md5sum | awk '{print $1}')
+    local date_md5_six="${date_md5:0:6}"
+    
+    # 3 将日期MD5前6位加到prompt后面
+    local combined_str="${prompt}${date_md5_six}"
+    
+    # 4 使用md5加密，作为token（32位小写）
+    local token=$(echo -n "$combined_str" | md5sum | awk '{print $1}')
+    
+    echo "$token"
+}
+
+# ========== sai命令修复版 ==========
+# ========== 修复的sai命令 ==========
+# ========== 修复的sai命令 ==========
+command_sai() {
+    local config_file="$HOME/.ucst_sai_config"
+    
+    # 检查依赖
+    for cmd in curl jq md5sum; do
+        if ! _cmd_exists "$cmd"; then
+            echo "错误: 缺少命令 '$cmd'"
+            echo "正在尝试安装"
+            if [ -n "${UCST_DEP_MAP[$cmd]}" ]; then
+                _silent_install "${UCST_DEP_MAP[$cmd]}"
+            else
+                case "$cmd" in
+                    "curl") _silent_install "curl" ;;
+                    "jq") _silent_install "jq" ;;
+                    "md5sum") _silent_install "coreutils" ;;
+                esac
+            fi
+            
+            if ! _cmd_exists "$cmd"; then
+                echo "依赖安装失败, 请手动安装: $cmd"
+                return 1
+            fi
+        fi
+    done
+    
+    # 检查配置
+    if [ ! -f "$config_file" ]; then
+        echo "错误: 未找到配置文件"
+        echo "请先运行: account -s"
+        return 1
+    fi
+    
+    # 读取配置
+    local api_url=$(grep '^api_url=' "$config_file" | cut -d"'" -f2 2>/dev/null)
+    local ca=$(grep '^ca=' "$config_file" | cut -d"'" -f2 2>/dev/null)
+    
+    if [ -z "$api_url" ]; then
+        api_url="https://ai.coludai.cn"
+    fi
+    
+    if [ -z "$ca" ]; then
+        echo "错误: 配置文件中缺少CA"
+        return 1
+    fi
+    
+    echo "=== SAI聊天助手 ==="
+    echo "API服务器: $api_url"
+    echo "CA: ${ca:0:12}..."
+    echo ""
+    
+    # 检查网络连接
+    echo "检查网络连接"
+    local domain=$(echo "$api_url" | sed 's|https*://||' | sed 's|/.*||')
+    if ! ping -c 1 -W 2 "$domain" >/dev/null 2>&1; then
+        echo "网络连接失败, 请检查网络"
+        return 1
+    fi
+    echo "网络连接正常"
+    
+    # 测试API连接
+    echo "测试API连接"
+    local test_file=$(mktemp)
+    local test_prompt="test"
+    local test_token=$(_generate_token_for_api "$test_prompt")
+    local http_code
+    
+    http_code=$(curl -s -X POST \
+        "${api_url}/api/chat" \
+        -H "Content-Type: application/json" \
+        -H "ca: $ca" \
+        -d "{\"prompt\":\"$test_prompt\",\"token\":\"$test_token\",\"stream\":false}" \
+        --connect-timeout 10 \
+        -o "$test_file" \
+        -w "%{http_code}")
+    
+    if [ "$http_code" = "200" ]; then
+        echo "API连接正常"
+    else
+        echo "API连接测试失败, HTTP状态码: $http_code"
+        if [ -s "$test_file" ]; then
+            echo "响应: $(head -c 200 "$test_file")"
+        fi
+        rm -f "$test_file"
+        return 1
+    fi
+    rm -f "$test_file"
+    
+    # 初始化会话
+    echo "正在初始化"
+    local session_id=""
+    local session_file=$(mktemp)
+    
+    http_code=$(curl -s -X POST \
+        "${api_url}/api/session/create" \
+        -H "Content-Type: application/json" \
+        -H "ca: $ca" \
+        -d "{}" \
+        --connect-timeout 10 \
+        -o "$session_file" \
+        -w "%{http_code}")
+    
+    if [ "$http_code" = "200" ]; then
+        session_id=$(jq -r '.sessionid // empty' "$session_file" 2>/dev/null)
+        if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
+            echo "会话已创建: ${session_id:0:12}..."
+        else
+            echo "无法获取会话ID, 使用无会话模式"
+            session_id=""
+        fi
+    else
+        echo "会话创建失败, 使用无会话模式"
+        session_id=""
+    fi
+    rm -f "$session_file"
+    
+    echo ""
+    echo "输入 'quit' 退出, 'new' 新建会话, 'switch' 切换模式"
+    echo "当前模式: SAI-Chat"
+    echo ""
+    
+    local mode="chat"
+    local prompt=""
+    local temp_file=""
+    
+    while true; do
+        echo -n "您: "
+        read -r prompt
+        
+        case "$prompt" in
+            quit|exit|q)
+                break
+                ;;
+            new|reset)
+                # 删除旧会话
+                if [ -n "$session_id" ]; then
+                    curl -s -X POST \
+                        "${api_url}/api/session/delete" \
+                        -H "Content-Type: application/json" \
+                        -H "ca: $ca" \
+                        -d "{\"sessionid\":\"$session_id\"}" >/dev/null 2>&1
+                fi
+                
+                # 创建新会话
+                session_file=$(mktemp)
+                http_code=$(curl -s -X POST \
+                    "${api_url}/api/session/create" \
+                    -H "Content-Type: application/json" \
+                    -H "ca: $ca" \
+                    -d "{}" \
+                    --connect-timeout 10 \
+                    -o "$session_file" \
+                    -w "%{http_code}")
+                
+                if [ "$http_code" = "200" ]; then
+                    session_id=$(jq -r '.sessionid // empty' "$session_file" 2>/dev/null)
+                    if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
+                        echo "新会话已创建: ${session_id:0:12}..."
+                    else
+                        echo "新会话创建失败, 使用无会话模式"
+                        session_id=""
+                    fi
+                else
+                    echo "新会话创建失败, 使用无会话模式"
+                    session_id=""
+                fi
+                rm -f "$session_file"
+                continue
+                ;;
+            switch)
+                if [ "$mode" = "chat" ]; then
+                    mode="coder"
+                    echo "切换到 SAI-Coder 模式"
+                else
+                    mode="chat"
+                    echo "切换到 SAI-Chat 模式"
+                fi
+                continue
+                ;;
+            "")
+                continue
+                ;;
+        esac
+        
+        # 生成token
+        local token=$(_generate_token_for_api "$prompt")
+        
+        echo "正在思考"
+        
+        # 构建请求
+        local json_data=""
+        local api_endpoint=""
+        
+        if [ "$mode" = "chat" ]; then
+            api_endpoint="${api_url}/api/chat"
+            if [ -n "$session_id" ]; then
+                json_data="{\"prompt\":\"$prompt\",\"token\":\"$token\",\"stream\":false,\"sessionid\":\"$session_id\"}"
+            else
+                json_data="{\"prompt\":\"$prompt\",\"token\":\"$token\",\"stream\":false}"
+            fi
+        else
+            api_endpoint="${api_url}/api/chat/coder"
+            json_data="{\"prompt\":\"$prompt\",\"token\":\"$token\",\"stream\":false,\"sysprompt\":\"\"}"
+        fi
+        
+        # 发送请求
+        temp_file=$(mktemp)
+        
+        http_code=$(curl -s -X POST \
+            "$api_endpoint" \
+            -H "Content-Type: application/json" \
+            -H "ca: $ca" \
+            -d "$json_data" \
+            --connect-timeout 30 \
+            --max-time 60 \
+            -o "$temp_file" \
+            -w "%{http_code}")
+        
+        if [ "$http_code" = "200" ]; then
+            # 处理双重编码的JSON响应
+            local raw_response=$(cat "$temp_file")
+            
+            # 尝试解析为JSON
+            if echo "$raw_response" | jq -e . >/dev/null 2>&1; then
+                # 如果是有效的JSON，检查是否有output字段
+                if echo "$raw_response" | jq -e '.output' >/dev/null 2>&1; then
+                    # 正常情况：直接获取output
+                    local output=$(echo "$raw_response" | jq -r '.output')
+                    # 处理Unicode转义序列
+                    output=$(echo -e "$output")
+                    echo ""
+                    echo "SAI: $output"
+                else
+                    # 可能是双重编码的JSON字符串
+                    # 尝试提取字符串内容并再次解析
+                    local inner_json=$(echo "$raw_response" | jq -r . 2>/dev/null)
+                    if echo "$inner_json" | jq -e . >/dev/null 2>&1; then
+                        # 内部也是有效的JSON
+                        if echo "$inner_json" | jq -e '.output' >/dev/null 2>&1; then
+                            local output=$(echo "$inner_json" | jq -r '.output')
+                            output=$(echo -e "$output")
+                            echo ""
+                            echo "SAI: $output"
+                        else
+                            echo ""
+                            echo "错误: 响应格式不支持"
+                            echo "原始响应: $raw_response"
+                        fi
+                    else
+                        # 内部不是JSON，直接显示
+                        echo ""
+                        echo "SAI: $inner_json"
+                    fi
+                fi
+            else
+                # 不是有效的JSON，直接显示
+                echo ""
+                echo "响应不是有效的JSON"
+                echo "原始响应: $raw_response"
+            fi
+        else
+            echo ""
+            echo "请求失败, HTTP状态码: $http_code"
+            
+            if [ -s "$temp_file" ]; then
+                local error_response=$(head -c 200 "$temp_file")
+                echo "响应: $error_response"
+            fi
+            
+            # 如果是认证错误，建议重新登录
+            if [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+                echo "建议重新运行 'account -s' 更新CA"
+            fi
+        fi
+        
+        rm -f "$temp_file"
+        echo ""
+    done
+    
+    # 清理会话
+    if [ -n "$session_id" ]; then
+        curl -s -X POST \
+            "${api_url}/api/session/delete" \
+            -H "Content-Type: application/json" \
+            -H "ca: $ca" \
+            -d "{\"sessionid\":\"$session_id\"}" >/dev/null 2>&1
+        echo "会话已清理"
+    fi
+    
+    echo "再见"
+}
+
+# ========== token生成函数保持不变 ==========
+_generate_token_for_api() {
+    local prompt="$1"
+    
+    # 1 获取当前日期，格式: YYYY-MM-DD
+    local current_date=$(date +"%Y-%m-%d")
+    
+    # 2 将日期使用md5加密，取前六位（32位小写）
+    local date_md5=$(echo -n "$current_date" | md5sum | awk '{print $1}')
+    local date_md5_six="${date_md5:0:6}"
+    
+    # 3 将日期MD5前6位加到prompt后面
+    local combined_str="${prompt}${date_md5_six}"
+    
+    # 4 使用md5加密，作为token（32位小写）
+    local token=$(echo -n "$combined_str" | md5sum | awk '{print $1}')
+    
+    echo "$token"
+}
+# ========== token生成函数保持不变 ==========
+_generate_token_for_api() {
+    local prompt="$1"
+    
+    # 1 获取当前日期，格式: YYYY-MM-DD
+    local current_date=$(date +"%Y-%m-%d")
+    
+    # 2 将日期使用md5加密，取前六位（32位小写）
+    local date_md5=$(echo -n "$current_date" | md5sum | awk '{print $1}')
+    local date_md5_six="${date_md5:0:6}"
+    
+    # 3 将日期MD5前6位加到prompt后面
+    local combined_str="${prompt}${date_md5_six}"
+    
+    # 4 使用md5加密，作为token（32位小写）
+    local token=$(echo -n "$combined_str" | md5sum | awk '{print $1}')
+    
+    echo "$token"
+}
+# ========== 主程序 ==========
+# 解析命令
+CALLED_NAME=$(basename "$0")
+if [ "$CALLED_NAME" = "UCST-English" ]; then
+    CMD="$1"
+    shift
+else
+    CMD="$CALLED_NAME"
+fi
+ARGS="$@"
+command_UCST() { #简介信息
+    echo "Ubuntu Command Simplification Tool——————Ubuntu命令简化工具"
+    echo "此工具的开发皆在于简化Ubuntu命令使用户在更便捷的环境下完成工作"
+    echo "请注意，此工具在使用过程中会产生大量下载内容（安装必须的依赖），请尽量保持互联网连接"
+    echo "开发者：哈西力工"
+    echo "输入helpUCST获得可用命令帮助"
+    echo "祝您工作顺利！"
+}
+command_helpUCST() { #现在能用的命令（没写完呢写不动了）
+    echo "=== 可用命令 ==="
+    echo "UCST        -简介信息"
+    echo "about       -查看基本信息"
+    echo "about -a    -查看详细信息"
+    echo "about -c    -查看处理器信息"
+    echo "about -g    -查看显卡信息"
+    echo "about -o    -查看操作系统信息"
+    echo "about -s    -查看用户信息"
+    echo "list        -查看文件列表（可能无效，建议使用ls）"
+    echo "delete      -删除文件或目录"
+    echo "network -i  -查看网络信息"
+    echo "network -c  -查看网卡信息"
+    echo "disk        -查看磁盘信息"
+    echo "disk -m     -挂载文件系统"
+    echo "ctime       -查看时间信息"
+    echo "process     -查看进程"
+    echo "helpUCST    -查看帮助信息"
+    echo "nkill       -强制杀死进程"
+    echo "nkill -p    -暂停正在工作的进程"
+    echo "nkill -c    -继续被暂停的进程"
+    echo "open        -打开文件"
+    echo "new         -新建目录或文件"
+    echo "mod         -修改文件或目录属性"
+    echo "driver      -列出驱动信息"
+    echo "driver -r   -查看完全驱动信息"
+    echo "driver -i   -安装缺失驱动"
+    echo "driver -d   -删除驱动"
+    echo "backup      -文件备份与恢复"
+    echo "check       -文件编码检查"
+    echo "download    -网络资源下载"
+    echo "search      -搜索文件"
+    echo "account     -登录账户(coludai)"
+    echo "sai         -启动SAI-Coder模型"
+}
+case "$CMD" in #解释器
+    "about")
+        command_about
+        ;;
+    "list")
+        command_list
+        ;;
+    "network")
+        command_network
+        ;;
+    "disk")
+        command_disk
+        ;;
+    "ctime")
+        command_ctime
+        ;;
+    "process")
+        command_process
+        ;;
+    "nkill")
+        command_nkill
+        ;;
+    "open")
+        command_open
+        ;;
+    "delete")
+        command_delete
+        ;;
+    "helpUCST") 
+        command_helpUCST
+        ;;
+    "new")
+        command_new
+        ;;
+    "mod")
+        command_mod
+        ;;
+    "driver")
+        command_driver
+        ;;
+    "backup")
+        command_backup
+        ;;
+    "check")
+        command_check
+        ;;
+    "UCST")
+        command_UCST
+        ;;
+    "download")
+        command_download
+        ;;
+    "search")
+        command_search
+        ;;
+    "account")
+        command_account $ARGS 
+        ;;
+    "sai")
+        command_sai
+        ;;
+    "")
+        echo "Ubuntu Command Simplification Tool——————Ubuntu命令简化工具"
+        echo "输入 'helpUCST' 查看可用命令" #就特么六个词记不住诗人握持
+        ;;
+    *)
+        if [ "$CALLED_NAME" = "UCST-English" ]; then #哪个傻逼瞎他妈打命令
+            echo "错误: 未知命令 '$CMD'"
+            echo "输入 'helpUCST' 查看可用命令" #这么点玩意记不住你也是个人了，赶紧滚去用你那sb的Windows吧
+        else
+            echo "错误: 未知命令 '$CALLED_NAME'"
+            echo "输入 'helpUCST' 查看可用命令" #再他妈瞎打命令半夜给你沙了
+        fi
+        exit 1
+        ;;
+esac #寄了
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##         ##   ####         ####   ####                  ########
+##         ##   ####         ####   ####                 ##########
+##         ##    ####       ####    ####                ##
+##         ##      ####    ####     ####               ##
+#############        ########       ####              ##
+#############        ########       ####              ##      ######   
+##         ##      ####    ####     ####               ##          #
+##         ##    ####        ####   ####                ##         #
+##         ##  ####           ####  ################     ##########
+##         ##  ####           ####  ################      ########
+#哈西力工骨灰盒级防伪标识
+#瞎搬运司马
+#www.520254.com (小惊喜网站，送给搬运司马狗)
