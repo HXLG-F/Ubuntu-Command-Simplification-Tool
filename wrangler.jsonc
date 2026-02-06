@@ -1,0 +1,5 @@
+{
+  "name": "ubuntu-command-simplification-tool",
+  "compatibility_date": "2026-02-06",
+  "main": "src/index.ts"  // 或者你的实际入口文件路径
+}
