@@ -19,5 +19,6 @@ sudo chmod +x /usr/local/bin/UCST-English
 sudo rm -f /usr/local/bin/UCST-English
 ```
 # 有关此工具的详细内容请查看使用说明
+
 # 当前最新版本：Beta0.64
 该版本对语言设置功能进行了简化整改，同时加入新命令：amend。需要与open命令区分点：open命令仅可以打开所支持（系统自身或第三方工具）格式的文件，而amend可以无视格式问题，直接使用可编辑文本编辑器打开任意文件。
