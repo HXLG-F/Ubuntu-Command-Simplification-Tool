@@ -1,7 +1,7 @@
 #!/bin/bash
 #项目创建于2025年10月25日 
 #QmV0YTAuNzUgMjAyNi0wNy0zMQ==                                       
-#Ubuntu Command Simplification Tool——————Ubuntu命令简化工具      使用Deepseek辅助研发/设计
+#Ubuntu Command Simplification Tool——————Ubuntu命令简化工具      使用Deepseek辅助研发
 #2026.7.31 Beta0.75测试版本：针对SAI交互界面进行了重制，同时依据coludai官方文档要求修正了token生成规则。新增service命令，用于统一查看/解决服务问题。以及新增部分命令及功能
 #请注意：UCST目前仅对Ubuntu系统命令进行简化，功能性工具组件（如ssh等）、第三方工具组件及驱动程序组件命令不予简化处理
 #请适时适况使用该工具
