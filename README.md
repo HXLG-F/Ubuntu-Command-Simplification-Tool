@@ -1,5 +1,5 @@
-# Universal Command Scripting Toolkit
-一个轻量级运维命令编排框架，通过标准化函数接口，允许开发者/企业快速构建内部运维工具集，并提供插件市场和商业支持服务。
+# Ubuntu-Command-Simplification-Tool
+通过大量集合封装简化命令、减少操作步骤，显著提升工作效率和便捷度
 # 下载与使用
 使用此命令将主命令文件下载到您的设备
 ```bash
