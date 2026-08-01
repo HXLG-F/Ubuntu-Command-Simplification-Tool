@@ -1,5 +1,5 @@
-# Ubuntu-Command-Simplification-Tool
-此工具的开发皆在于简化Ubuntu命令使用户在更便捷的环境下完成工作
+# Universal Command Scripting Toolkit
+一个轻量级运维命令编排框架，通过标准化函数接口，允许开发者/企业快速构建内部运维工具集，并提供插件市场和商业支持服务。
 # 下载与使用
 使用此命令将主命令文件下载到您的设备
 ```bash
